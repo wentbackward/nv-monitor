@@ -11,6 +11,7 @@ A lightweight terminal system monitor built for the **NVIDIA DGX Spark** (Grace 
 - **GPU**: Utilization bar, temperature, power draw, clock speed, encoder/decoder utilization
 - **GPU Processes**: PID, user, type (Compute/Graphics), GPU memory, command name
 - **Unified Memory**: Gracefully handles the DGX Spark's shared CPU/GPU memory architecture
+- **History Chart**: Rolling CPU/GPU usage graph (last 20 samples) using Unicode block elements
 - Color-coded bars (green/yellow/red) based on utilization thresholds
 - 1s default refresh, adjustable at runtime
 - NVML loaded dynamically at runtime — no hard dependency on NVIDIA drivers

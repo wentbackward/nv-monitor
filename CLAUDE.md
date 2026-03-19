@@ -13,20 +13,21 @@ make          # builds nv-monitor binary
 make clean    # removes binary
 ```
 
-Direct compilation: `gcc -O2 -Wall -Wextra -std=gnu11 -o nv-monitor nv-monitor.c -lncurses -ldl -lpthread`
+Direct compilation: `gcc -O2 -Wall -Wextra -std=gnu11 -o nv-monitor nv-monitor.c -lncursesw -ldl -lpthread`
 
 Dependencies: `build-essential`, `libncurses-dev`
 
 ## Architecture
 
-Everything is in `nv-monitor.c` (~650 lines). Key sections:
+Everything is in `nv-monitor.c` (~940 lines). Key sections:
 
 - **NVML dynamic loading** (line ~115): Loads `libnvidia-ml.so.1` via `dlopen`/`dlsym` at runtime. Uses a variadic LOAD macro to try versioned symbols first (e.g. `nvmlInit_v2` before `nvmlInit`). All NVML function pointers are prefixed with `p` (e.g. `pNvmlInit`).
 - **CPU sampling**: Reads `/proc/stat` delta between frames to compute per-core usage percentages.
 - **Memory**: Parses `/proc/meminfo` for used/available/buffers/cached/swap.
 - **CPU thermals/freq**: Reads from `/sys/class/thermal/` and `/sys/devices/system/cpu/`.
 - **GPU process info**: Queries both compute and graphics process lists via NVML, resolves PID to command name and user via `/proc/<pid>/`.
-- **TUI rendering**: ncurses with color pairs (1=red/critical, 2=green/normal, 3=yellow/medium, 6=cyan/headers). `draw_screen()` is the main render function.
+- **TUI rendering**: ncursesw (wide character support) with color pairs (1=red/critical, 2=green/normal, 3=yellow/medium, 6=cyan/headers). `draw_screen()` is the main render function.
+- **History chart**: Ring buffer of last 20 CPU/GPU samples, rendered as vertical bar chart using Unicode block elements (▁▂▃▄▅▆▇█) in the bottom-right corner.
 
 ## DGX Spark specifics
 
