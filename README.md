@@ -15,6 +15,8 @@ A lightweight terminal system monitor built for the **NVIDIA DGX Spark** (Grace 
 - 1s default refresh, adjustable at runtime
 - NVML loaded dynamically at runtime — no hard dependency on NVIDIA drivers
 
+![nv-monitor screenshot](nv-monitor.png)
+
 ## Download
 
 For the reckless among you, there's a [binary release](https://github.com/wentbackward/nv-monitor/releases) you can download if you don't want to build it yourself.
