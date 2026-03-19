@@ -77,6 +77,7 @@ static int   nvml_ok = 0;
 #define REFRESH_MS    1000
 #define BAR_CHAR_FULL  ACS_BLOCK
 #define COLOR_GRAY     8
+#define HISTORY_LEN   20
 
 /* ── CPU state ──────────────────────────────────────────────────────── */
 
@@ -98,10 +99,18 @@ typedef struct {
     char          type; /* C=compute, G=graphics */
 } GpuProc;
 
+/* ── History ring buffers ────────────────────────────────────────────── */
+
+static double cpu_history[HISTORY_LEN];
+static double gpu_history[HISTORY_LEN];
+static int    history_pos = 0;
+static int    history_count = 0;
+
 /* ── Globals ────────────────────────────────────────────────────────── */
 
 static volatile sig_atomic_t g_quit = 0;
 static int sort_mode = 0; /* 0=by mem, 1=by pid */
+static double last_gpu_util = 0; /* captured during draw for history */
 
 /* ── Signal handler ─────────────────────────────────────────────────── */
 
@@ -416,6 +425,96 @@ static void get_loadavg(double *l1, double *l5, double *l15) {
     if (f) { (void)!fscanf(f, "%lf %lf %lf", l1, l5, l15); fclose(f); }
 }
 
+/* ── History chart ──────────────────────────────────────────────────── */
+
+/* Unicode block elements: ▁▂▃▄▅▆▇█ (U+2581..U+2588) */
+static const char *block_chars[] = {
+    " ", "\xe2\x96\x81", "\xe2\x96\x82", "\xe2\x96\x83",
+    "\xe2\x96\x84", "\xe2\x96\x85", "\xe2\x96\x86",
+    "\xe2\x96\x87", "\xe2\x96\x88"
+};
+
+static void draw_history_chart(int top_y, int right_x, int chart_h, int chart_w) {
+    int n = history_count < chart_w ? history_count : chart_w;
+    if (n == 0) return;
+
+    /* Chart title */
+    int title_x = right_x - chart_w - 1;
+    attron(A_BOLD | COLOR_PAIR(7));
+    mvprintw(top_y - 1, title_x, "CPU");
+    attroff(A_BOLD | COLOR_PAIR(7));
+    attron(COLOR_PAIR(8));
+    printw("/");
+    attroff(COLOR_PAIR(8));
+    attron(A_BOLD | COLOR_PAIR(6));
+    printw("GPU");
+    attroff(A_BOLD | COLOR_PAIR(6));
+    attron(COLOR_PAIR(8));
+    printw(" history");
+    attroff(COLOR_PAIR(8));
+
+    /* For each sample column, draw CPU and GPU as stacked/overlaid vertical bars.
+     * Each column is 2 chars wide: one for CPU, one for GPU */
+    int col_w = 2; /* chars per sample: CPU char + GPU char */
+    int max_samples = chart_w / col_w;
+    if (n > max_samples) n = max_samples;
+
+    for (int s = 0; s < n; s++) {
+        /* Get sample index (oldest to newest, left to right) */
+        int idx = (history_pos - n + s + HISTORY_LEN) % HISTORY_LEN;
+        double cpu_val = cpu_history[idx];
+        double gpu_val = gpu_history[idx];
+
+        /* Map percentage to block level (0-8) per row */
+        int cpu_blocks = (int)(cpu_val / 100.0 * chart_h * 8 + 0.5);
+        int gpu_blocks = (int)(gpu_val / 100.0 * chart_h * 8 + 0.5);
+
+        int x = right_x - (n - s) * col_w;
+
+        for (int row = 0; row < chart_h; row++) {
+            int ry = top_y + chart_h - 1 - row; /* bottom to top */
+            int row_base = row * 8;
+
+            /* CPU column */
+            int cpu_fill = cpu_blocks - row_base;
+            if (cpu_fill < 0) cpu_fill = 0;
+            if (cpu_fill > 8) cpu_fill = 8;
+
+            /* GPU column */
+            int gpu_fill = gpu_blocks - row_base;
+            if (gpu_fill < 0) gpu_fill = 0;
+            if (gpu_fill > 8) gpu_fill = 8;
+
+            int cpu_color = cpu_val > 90 ? 1 : (cpu_val > 60 ? 3 : 2);
+            int gpu_color = gpu_val > 90 ? 1 : (gpu_val > 60 ? 3 : 6);
+
+            move(ry, x);
+            attron(COLOR_PAIR(cpu_color));
+            printw("%s", block_chars[cpu_fill]);
+            attroff(COLOR_PAIR(cpu_color));
+            attron(COLOR_PAIR(gpu_color));
+            printw("%s", block_chars[gpu_fill]);
+            attroff(COLOR_PAIR(gpu_color));
+        }
+    }
+
+    /* Y-axis labels */
+    int lx = right_x - n * col_w - 5;
+    if (lx >= 0) {
+        attron(COLOR_PAIR(8));
+        mvprintw(top_y, lx, "100%%");
+        mvprintw(top_y + chart_h - 1, lx, "  0%%");
+        attroff(COLOR_PAIR(8));
+    }
+}
+
+static void record_history(double cpu, double gpu) {
+    cpu_history[history_pos] = cpu;
+    gpu_history[history_pos] = gpu;
+    history_pos = (history_pos + 1) % HISTORY_LEN;
+    if (history_count < HISTORY_LEN) history_count++;
+}
+
 /* ── Main draw ──────────────────────────────────────────────────────── */
 
 static void draw_screen(void) {
@@ -574,6 +673,7 @@ static void draw_screen(void) {
 
             nvmlUtilization_t util = {0};
             pNvmlDeviceGetUtilizationRates(dev, &util);
+            last_gpu_util = (double)util.gpu;
 
             unsigned int temp = 0;
             pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
@@ -732,6 +832,17 @@ static void draw_screen(void) {
                     y++;
                 }
             }
+        }
+    }
+
+    /* ── History chart (bottom right) ──────────────────────────────── */
+    record_history(cpu_pct[0], last_gpu_util);
+    {
+        int chart_h = 5;
+        int chart_w = HISTORY_LEN * 2; /* 2 chars per sample */
+        int chart_top = rows - 2 - chart_h;
+        if (chart_top > y + 1 && cols > chart_w + 10) {
+            draw_history_chart(chart_top, cols - 1, chart_h, chart_w);
         }
     }
 

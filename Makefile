@@ -1,6 +1,6 @@
 CC      = gcc
 CFLAGS  = -O2 -Wall -Wextra -std=gnu11
-LDFLAGS = -lncurses -ldl -lpthread
+LDFLAGS = -lncursesw -ldl -lpthread
 TARGET  = nv-monitor
 
 all: $(TARGET)
