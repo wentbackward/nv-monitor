@@ -603,12 +603,14 @@ static void draw_screen(void) {
             /* GPU utilization bar */
             mvprintw(y, 1, "  GPU ");
             {
-                int bw = cols / 2 - 10;
+                int bx = 7;
+                int bw = cols - bx - 7; /* leave room for " 100%" */
                 if (bw < 10) bw = 10;
                 int color = util.gpu > 90 ? 1 : (util.gpu > 60 ? 3 : 6);
-                draw_bar(y, 7, bw, (double)util.gpu, color);
-                printw(" %3u%%", util.gpu);
+                draw_bar(y, bx, bw, (double)util.gpu, color);
+                mvprintw(y, bx + bw + 1, "%3u%%", util.gpu);
             }
+            y++;
 
             /* Memory usage */
             nvmlMemory_t mem = {0};
@@ -617,20 +619,22 @@ static void draw_screen(void) {
                            mem.total > 0);
 
             if (has_mem) {
-                int rx = cols / 2 + 1;
-                mvprintw(y, rx, "VRAM ");
-                int bw = cols / 2 - 10;
+                mvprintw(y, 1, "  VRAM");
+                int bx = 7;
+                int bw = cols - bx - 18; /* room for " 12.3G/34.5G" */
                 if (bw < 10) bw = 10;
                 double mem_pct = (double)mem.used / mem.total * 100.0;
                 int color = mem_pct > 90 ? 1 : (mem_pct > 60 ? 3 : 5);
-                draw_bar(y, rx + 5, bw, mem_pct, color);
+                draw_bar(y, bx, bw, mem_pct, color);
                 char ub2[16], tb2[16];
                 fmt_bytes(mem.used, ub2, sizeof(ub2));
                 fmt_bytes(mem.total, tb2, sizeof(tb2));
-                printw(" %s/%s", ub2, tb2);
+                mvprintw(y, bx + bw + 1, "%s/%s", ub2, tb2);
             } else {
-                int rx = cols / 2 + 1;
-                mvprintw(y, rx, "VRAM  unified memory (shared with CPU)");
+                mvprintw(y, 1, "  VRAM");
+                attron(COLOR_PAIR(7));
+                printw("  unified memory (shared with CPU)");
+                attroff(COLOR_PAIR(7));
             }
             y++;
 
