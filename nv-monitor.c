@@ -558,17 +558,17 @@ static void draw_screen(void) {
     mvprintw(y, cols / 2 + 1, "Overall: ");
     attroff(A_BOLD);
     {
-        int bw = cols / 2 - 14;
+        int bw = cols / 2 - 17; /* 10 label + 7 suffix " xxx.x%" */
         if (bw < 10) bw = 10;
         int color = cpu_pct[0] > 90 ? 1 : (cpu_pct[0] > 60 ? 3 : 2);
         draw_bar(y, cols / 2 + 10, bw, cpu_pct[0], color);
-        printw(" %4.1f%%", cpu_pct[0]);
+        mvprintw(y, cols / 2 + 10 + bw, " %4.1f%%", cpu_pct[0]);
     }
     y += 1;
 
     /* Per-core bars - two columns */
     int half = (num_cpus + 1) / 2;
-    int bar_w = cols / 2 - 10;
+    int bar_w = cols / 2 - 11; /* 4 label + 7 suffix " xxx.x%" */
     if (bar_w < 5) bar_w = 5;
 
     for (int i = 0; i < half; i++) {
@@ -579,7 +579,7 @@ static void draw_screen(void) {
         int color = cpu_pct[cpu_l] > 90 ? 1 : (cpu_pct[cpu_l] > 60 ? 3 : 2);
         mvprintw(y, 1, "%2d ", i);
         draw_bar(y, 4, bar_w, cpu_pct[cpu_l], color);
-        printw(" %4.1f%%", cpu_pct[cpu_l]);
+        mvprintw(y, 4 + bar_w, " %4.1f%%", cpu_pct[cpu_l]);
 
         /* Right column */
         if (cpu_r <= num_cpus) {
@@ -587,7 +587,7 @@ static void draw_screen(void) {
             color = cpu_pct[cpu_r] > 90 ? 1 : (cpu_pct[cpu_r] > 60 ? 3 : 2);
             mvprintw(y, rx, "%2d ", i + half);
             draw_bar(y, rx + 3, bar_w, cpu_pct[cpu_r], color);
-            printw(" %4.1f%%", cpu_pct[cpu_r]);
+            mvprintw(y, rx + 3 + bar_w, " %4.1f%%", cpu_pct[cpu_r]);
         }
         y++;
         if (y >= rows - 2) break;
@@ -617,12 +617,10 @@ static void draw_screen(void) {
     y++;
 
     {
-        int bw = cols - 6;
+        int bw = cols - 13; /* 4 left + 7 suffix " xxx.x%" + 2 margin */
         if (bw < 10) bw = 10;
         draw_bar_segmented(y, 4, bw, pct_app, pct_bufcache, 2, 4);
-        char pb[16];
-        snprintf(pb, sizeof(pb), " %.1f%%", pct_used);
-        printw("%s", pb);
+        mvprintw(y, 4 + bw, " %.1f%%", pct_used);
     }
     y++;
 
@@ -639,11 +637,11 @@ static void draw_screen(void) {
         printw("  %s / %s", sub, stb);
         y++;
         {
-            int bw = cols - 6;
+            int bw = cols - 13;
             if (bw < 10) bw = 10;
             int color = swap_pct > 80 ? 1 : (swap_pct > 40 ? 3 : 5);
             draw_bar(y, 4, bw, swap_pct, color);
-            printw(" %.1f%%", swap_pct);
+            mvprintw(y, 4 + bw, " %.1f%%", swap_pct);
         }
         y++;
     }
