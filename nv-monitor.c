@@ -711,28 +711,35 @@ static void draw_screen(void) {
     MemInfo mi;
     read_meminfo(&mi);
     unsigned long long used_kb = mi.total_kb - mi.avail_kb;
-    double pct_used = mi.total_kb ? (double)used_kb / mi.total_kb * 100.0 : 0;
+    unsigned long long app_kb = used_kb > (mi.buffers_kb + mi.cached_kb)
+                              ? used_kb - mi.buffers_kb - mi.cached_kb : 0;
+    double pct_app = mi.total_kb ? (double)app_kb / mi.total_kb * 100.0 : 0;
     double pct_bufcache = mi.total_kb ? (double)(mi.buffers_kb + mi.cached_kb) / mi.total_kb * 100.0 : 0;
-    /* bufcache is part of used, show the non-bufcache used portion */
-    double pct_app = pct_used - pct_bufcache;
-    if (pct_app < 0) pct_app = 0;
 
     attron(A_BOLD | COLOR_PAIR(4));
     mvprintw(y, 1, "MEM");
     attroff(A_BOLD | COLOR_PAIR(4));
 
-    char tb[16], ub[16], bb[16];
+    char tb[16], ab[16], bb[16];
     fmt_bytes(mi.total_kb * 1024ULL, tb, sizeof(tb));
-    fmt_bytes(used_kb * 1024ULL, ub, sizeof(ub));
+    fmt_bytes(app_kb * 1024ULL, ab, sizeof(ab));
     fmt_bytes((mi.buffers_kb + mi.cached_kb) * 1024ULL, bb, sizeof(bb));
-    printw("  %s used / %s total  (buf/cache %s)", ub, tb, bb);
+    printw("  ");
+    attron(COLOR_PAIR(2));
+    printw("%s used", ab);
+    attroff(COLOR_PAIR(2));
+    printw(" + ");
+    attron(COLOR_PAIR(4));
+    printw("%s buf/cache", bb);
+    attroff(COLOR_PAIR(4));
+    printw(" / %s", tb);
     y++;
 
     {
-        int bw = cols - 13; /* 4 left + 7 suffix " xxx.x%" + 2 margin */
+        int bw = cols - 13;
         if (bw < 10) bw = 10;
         draw_bar_segmented(y, 4, bw, pct_app, pct_bufcache, 2, 4);
-        mvprintw(y, 4 + bw, " %.1f%%", pct_used);
+        mvprintw(y, 4 + bw, " %.1f%%", pct_app + pct_bufcache);
     }
     y++;
 
