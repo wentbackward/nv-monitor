@@ -251,6 +251,8 @@ static void read_meminfo(MemInfo *m) {
     FILE *f = fopen("/proc/meminfo", "r");
     if (!f) return;
 
+    long long huge_total = -1, huge_free = -1, huge_size = -1;
+
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         if (sscanf(line, "MemTotal: %llu kB", &m->total_kb) == 1) continue;
@@ -259,8 +261,20 @@ static void read_meminfo(MemInfo *m) {
         if (sscanf(line, "Cached: %llu kB", &m->cached_kb) == 1) continue;
         if (sscanf(line, "SwapTotal: %llu kB", &m->swap_total_kb) == 1) continue;
         if (sscanf(line, "SwapFree: %llu kB", &m->swap_free_kb) == 1) continue;
+        if (sscanf(line, "HugePages_Total: %lld", &huge_total) == 1) continue;
+        if (sscanf(line, "HugePages_Free: %lld", &huge_free) == 1) continue;
+        if (sscanf(line, "Hugepagesize: %lld kB", &huge_size) == 1) continue;
     }
     fclose(f);
+
+    /* DGX Spark: when HugePages are active, MemAvailable is inaccurate.
+     * Use HugePages_Free * Hugepagesize instead, and report swap as 0
+     * since hugetlbfs pages are not swappable.
+     * See: docs.nvidia.com/dgx/dgx-spark/known-issues.html */
+    if (huge_total > 0 && huge_free >= 0 && huge_size > 0) {
+        m->avail_kb = (unsigned long long)(huge_free * huge_size);
+        m->swap_free_kb = m->swap_total_kb; /* effective 0 swap used */
+    }
 }
 
 /* ── CPU thermals ───────────────────────────────────────────────────── */
