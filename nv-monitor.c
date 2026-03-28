@@ -238,13 +238,28 @@ static void compute_cpu_usage(void) {
 /* ── Memory info ────────────────────────────────────────────────────── */
 
 typedef struct {
+    /* Raw values from /proc/meminfo */
     unsigned long long total_kb;
+    unsigned long long free_kb;
     unsigned long long avail_kb;
     unsigned long long buffers_kb;
     unsigned long long cached_kb;
     unsigned long long swap_total_kb;
     unsigned long long swap_free_kb;
+    /* Derived values */
+    unsigned long long app_kb;      /* actual application memory */
+    unsigned long long bufcache_kb; /* buffers + cached */
+    unsigned long long swap_used_kb;
 } MemInfo;
+
+/* Compute derived fields from raw /proc/meminfo values */
+static void meminfo_calc(MemInfo *m) {
+    m->bufcache_kb = m->buffers_kb + m->cached_kb;
+    m->app_kb = (m->total_kb > m->free_kb + m->bufcache_kb)
+              ? m->total_kb - m->free_kb - m->bufcache_kb : 0;
+    m->swap_used_kb = (m->swap_total_kb > m->swap_free_kb)
+                    ? m->swap_total_kb - m->swap_free_kb : 0;
+}
 
 static void read_meminfo(MemInfo *m) {
     memset(m, 0, sizeof(*m));
@@ -256,6 +271,7 @@ static void read_meminfo(MemInfo *m) {
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         if (sscanf(line, "MemTotal: %llu kB", &m->total_kb) == 1) continue;
+        if (sscanf(line, "MemFree: %llu kB", &m->free_kb) == 1) continue;
         if (sscanf(line, "MemAvailable: %llu kB", &m->avail_kb) == 1) continue;
         if (sscanf(line, "Buffers: %llu kB", &m->buffers_kb) == 1) continue;
         if (sscanf(line, "Cached: %llu kB", &m->cached_kb) == 1) continue;
@@ -275,6 +291,8 @@ static void read_meminfo(MemInfo *m) {
         m->avail_kb = (unsigned long long)(huge_free * huge_size);
         m->swap_free_kb = m->swap_total_kb; /* effective 0 swap used */
     }
+
+    meminfo_calc(m);
 }
 
 /* ── CPU thermals ───────────────────────────────────────────────────── */
@@ -570,11 +588,8 @@ static void log_csv_row(FILE *f) {
     /* Memory */
     MemInfo mi;
     read_meminfo(&mi);
-    unsigned long long used_kb = mi.total_kb - mi.avail_kb;
-    fprintf(f, ",%llu,%llu,%llu", used_kb, mi.total_kb,
-            mi.buffers_kb + mi.cached_kb);
-    fprintf(f, ",%llu,%llu",
-            mi.swap_total_kb - mi.swap_free_kb, mi.swap_total_kb);
+    fprintf(f, ",%llu,%llu,%llu", mi.app_kb, mi.total_kb, mi.bufcache_kb);
+    fprintf(f, ",%llu,%llu", mi.swap_used_kb, mi.swap_total_kb);
 
     /* GPU */
     if (nvml_ok) {
@@ -710,11 +725,8 @@ static void draw_screen(void) {
     /* ── Memory section ─────────────────────────────────────────────── */
     MemInfo mi;
     read_meminfo(&mi);
-    unsigned long long used_kb = mi.total_kb - mi.avail_kb;
-    unsigned long long app_kb = used_kb > (mi.buffers_kb + mi.cached_kb)
-                              ? used_kb - mi.buffers_kb - mi.cached_kb : 0;
-    double pct_app = mi.total_kb ? (double)app_kb / mi.total_kb * 100.0 : 0;
-    double pct_bufcache = mi.total_kb ? (double)(mi.buffers_kb + mi.cached_kb) / mi.total_kb * 100.0 : 0;
+    double pct_app = mi.total_kb ? (double)mi.app_kb / mi.total_kb * 100.0 : 0;
+    double pct_bufcache = mi.total_kb ? (double)mi.bufcache_kb / mi.total_kb * 100.0 : 0;
 
     attron(A_BOLD | COLOR_PAIR(4));
     mvprintw(y, 1, "MEM");
@@ -722,8 +734,8 @@ static void draw_screen(void) {
 
     char tb[16], ab[16], bb[16];
     fmt_bytes(mi.total_kb * 1024ULL, tb, sizeof(tb));
-    fmt_bytes(app_kb * 1024ULL, ab, sizeof(ab));
-    fmt_bytes((mi.buffers_kb + mi.cached_kb) * 1024ULL, bb, sizeof(bb));
+    fmt_bytes(mi.app_kb * 1024ULL, ab, sizeof(ab));
+    fmt_bytes(mi.bufcache_kb * 1024ULL, bb, sizeof(bb));
     printw("  ");
     attron(COLOR_PAIR(2));
     printw("%s used", ab);
@@ -745,13 +757,12 @@ static void draw_screen(void) {
 
     /* Swap */
     if (mi.swap_total_kb > 0) {
-        unsigned long long swap_used = mi.swap_total_kb - mi.swap_free_kb;
-        double swap_pct = (double)swap_used / mi.swap_total_kb * 100.0;
+        double swap_pct = (double)mi.swap_used_kb / mi.swap_total_kb * 100.0;
         attron(A_BOLD | COLOR_PAIR(4));
         mvprintw(y, 1, "SWP");
         attroff(A_BOLD | COLOR_PAIR(4));
         char stb[16], sub[16];
-        fmt_bytes(swap_used * 1024ULL, sub, sizeof(sub));
+        fmt_bytes(mi.swap_used_kb * 1024ULL, sub, sizeof(sub));
         fmt_bytes(mi.swap_total_kb * 1024ULL, stb, sizeof(stb));
         printw("  %s / %s", sub, stb);
         y++;

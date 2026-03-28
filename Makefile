@@ -12,10 +12,14 @@ $(TARGET): nv-monitor.c
 portable:
 	$(CC) $(CFLAGS_PORTABLE) -o $(TARGET) nv-monitor.c $(LDFLAGS)
 
+test: test_meminfo.c
+	$(CC) -O0 -Wall -Wextra -o test_meminfo test_meminfo.c
+	./test_meminfo
+
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) test_meminfo
 
 install: $(TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/
 
-.PHONY: all clean install
+.PHONY: all portable test clean install
