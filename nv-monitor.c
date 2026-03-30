@@ -78,6 +78,7 @@ static nvmlReturn_t (*pNvmlDeviceGetDecoderUtilization)(nvmlDevice_t, unsigned i
 
 static void *nvml_handle = NULL;
 static int   nvml_ok = 0;
+static char  cpu_model_name[128] = "";  /* from /proc/cpuinfo */
 
 /* ── Constants ──────────────────────────────────────────────────────── */
 
@@ -260,6 +261,34 @@ static int load_nvml(void) {
 }
 
 /* ── CPU core type identification ───────────────────────────────────── */
+
+static void read_cpu_model_name(void) {
+    /* Try device tree model first (works on ARM SBCs, DGX Spark, etc.) */
+    FILE *f = fopen("/sys/firmware/devicetree/base/model", "r");
+    if (f) {
+        if (fgets(cpu_model_name, sizeof(cpu_model_name), f))
+            cpu_model_name[strcspn(cpu_model_name, "\n\r")] = '\0';
+        fclose(f);
+        if (cpu_model_name[0]) return;
+    }
+
+    /* x86: "model name" from /proc/cpuinfo */
+    f = fopen("/proc/cpuinfo", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *sep = strchr(line, ':');
+        if (!sep) continue;
+        if (strncmp(line, "model name", 10) == 0) {
+            const char *val = sep + 1;
+            while (*val == ' ' || *val == '\t') val++;
+            snprintf(cpu_model_name, sizeof(cpu_model_name), "%s", val);
+            cpu_model_name[strcspn(cpu_model_name, "\n\r")] = '\0';
+            break;
+        }
+    }
+    fclose(f);
+}
 
 static void read_cpu_part_ids(void) {
     FILE *f = fopen("/proc/cpuinfo", "r");
@@ -1118,7 +1147,7 @@ static void draw_screen(void) {
     mvprintw(y, 0, " nv-monitor");
     attroff(A_BOLD | COLOR_PAIR(6));
     attron(COLOR_PAIR(7));
-    printw("  DGX Spark (Grace + GB10)");
+    printw("  %s", cpu_model_name[0] ? cpu_model_name : "Unknown CPU");
     attroff(COLOR_PAIR(7));
 
     char upbuf[64];
@@ -1538,7 +1567,8 @@ int main(int argc, char *argv[]) {
     /* Load NVML */
     nvml_ok = (load_nvml() == 0);
 
-    /* Read CPU core types (ARM part IDs) */
+    /* Read CPU info */
+    read_cpu_model_name();
     read_cpu_part_ids();
 
     /* Initial CPU tick read */
