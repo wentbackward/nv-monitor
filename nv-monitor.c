@@ -197,6 +197,7 @@ static double last_gpu_util = 0; /* captured during draw for history */
 static FILE *log_fp = NULL;
 static int   log_interval_ms = 1000;
 static int   no_ui = 0;
+static int   prom_port = 0;  /* Prometheus metrics port (0 = disabled) */
 
 /* ── Signal handler ─────────────────────────────────────────────────── */
 
@@ -751,7 +752,8 @@ static void print_usage(const char *prog) {
         "Options:\n"
         "  -l FILE   Log statistics to CSV file\n"
         "  -i MS     Log interval in milliseconds (default: 1000)\n"
-        "  -n        No UI (headless mode, requires -l)\n"
+        "  -n        No UI (headless mode, requires -l or -p)\n"
+        "  -p PORT   Expose Prometheus metrics on PORT\n"
         "  -r MS     UI refresh interval in milliseconds (default: 1000)\n"
         "  -v        Show version\n"
         "  -h        Show this help\n"
@@ -1170,11 +1172,12 @@ int main(int argc, char *argv[]) {
 
     const char *log_path = NULL;
     int opt;
-    while ((opt = getopt(argc, argv, "l:i:nr:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "l:i:np:r:vh")) != -1) {
         switch (opt) {
         case 'l': log_path = optarg; break;
         case 'i': log_interval_ms = atoi(optarg); break;
         case 'n': no_ui = 1; break;
+        case 'p': prom_port = atoi(optarg); break;
         case 'r': delay_ms = atoi(optarg); break;
         case 'v': printf("nv-monitor %s\n", VERSION); return 0;
         case 'h': print_usage(argv[0]); return 0;
@@ -1182,8 +1185,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (no_ui && !log_path) {
-        fprintf(stderr, "Error: -n (no UI) requires -l <file>\n");
+    if (no_ui && !log_path && !prom_port) {
+        fprintf(stderr, "Error: -n (no UI) requires -l <file> or -p <port>\n");
         return 1;
     }
     if (log_interval_ms < 100) log_interval_ms = 100;
