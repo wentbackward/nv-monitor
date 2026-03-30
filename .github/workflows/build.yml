@@ -17,13 +17,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libncurses-dev
 
       - name: Build
-        run: make portable
+        run: make portable && make demo-load
 
-      - name: Upload artifact
+      - name: Test
+        run: make test
+
+      - name: Upload nv-monitor
         uses: actions/upload-artifact@v4
         with:
           name: nv-monitor-linux-arm64
           path: nv-monitor
+
+      - name: Upload demo-load
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-load-linux-arm64
+          path: demo-load
 
   build-amd64:
     runs-on: ubuntu-24.04
@@ -34,13 +43,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libncurses-dev
 
       - name: Build
-        run: make portable
+        run: make portable && make demo-load
 
-      - name: Upload artifact
+      - name: Test
+        run: make test
+
+      - name: Upload nv-monitor
         uses: actions/upload-artifact@v4
         with:
           name: nv-monitor-linux-amd64
           path: nv-monitor
+
+      - name: Upload demo-load
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-load-linux-amd64
+          path: demo-load
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -49,23 +67,37 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download arm64 binary
+      - name: Download arm64 artifacts
         uses: actions/download-artifact@v4
         with:
           name: nv-monitor-linux-arm64
           path: arm64
 
-      - name: Download amd64 binary
+      - name: Download arm64 demo-load
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-load-linux-arm64
+          path: arm64
+
+      - name: Download amd64 artifacts
         uses: actions/download-artifact@v4
         with:
           name: nv-monitor-linux-amd64
           path: amd64
 
+      - name: Download amd64 demo-load
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-load-linux-amd64
+          path: amd64
+
       - name: Rename binaries
         run: |
           mv arm64/nv-monitor nv-monitor-linux-arm64
+          mv arm64/demo-load demo-load-linux-arm64
           mv amd64/nv-monitor nv-monitor-linux-amd64
-          chmod +x nv-monitor-linux-*
+          mv amd64/demo-load demo-load-linux-amd64
+          chmod +x nv-monitor-linux-* demo-load-linux-*
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -73,3 +105,5 @@ jobs:
           files: |
             nv-monitor-linux-arm64
             nv-monitor-linux-amd64
+            demo-load-linux-arm64
+            demo-load-linux-amd64

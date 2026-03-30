@@ -272,6 +272,18 @@ static void read_cpu_model_name(void) {
         if (cpu_model_name[0]) return;
     }
 
+    /* DMI product name (works on DGX Spark, most x86 systems) */
+    f = fopen("/sys/devices/virtual/dmi/id/product_name", "r");
+    if (f) {
+        if (fgets(cpu_model_name, sizeof(cpu_model_name), f))
+            cpu_model_name[strcspn(cpu_model_name, "\n\r")] = '\0';
+        fclose(f);
+        /* Clean up underscores for display */
+        for (char *p = cpu_model_name; *p; p++)
+            if (*p == '_') *p = ' ';
+        if (cpu_model_name[0]) return;
+    }
+
     /* x86: "model name" from /proc/cpuinfo */
     f = fopen("/proc/cpuinfo", "r");
     if (!f) return;
@@ -644,19 +656,17 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
     printw(" history");
     attroff(COLOR_PAIR(8));
 
-    /* Each sample gets 2 sub-columns (CPU + GPU), scaled to fill width */
-    int col_w = avail_w / n; /* chars per sample */
+    /* Fixed column width based on max samples — prevents rescaling as history fills */
+    int col_w = avail_w / HISTORY_LEN;
     if (col_w < 2) col_w = 2;
     int cpu_w = col_w / 2;
     int gpu_w = col_w - cpu_w;
 
-    /* Recalculate how many samples fit */
-    int visible = avail_w / col_w;
-    if (visible > n) visible = n;
+    int visible = n;
 
-    /* Center the chart within available space */
-    int chart_total = visible * col_w;
-    int x_start = left_x + (avail_w - chart_total) / 2;
+    /* Right-align: new samples appear on the right, chart grows leftward */
+    int chart_total = HISTORY_LEN * col_w;
+    int x_start = left_x + (avail_w - chart_total) + (HISTORY_LEN - visible) * col_w;
 
     for (int s = 0; s < visible; s++) {
         int idx = (history_pos - visible + s + HISTORY_LEN) % HISTORY_LEN;
