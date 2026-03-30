@@ -10,6 +10,9 @@ all: $(TARGET)
 $(TARGET): nv-monitor.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+demo-load: demo-load.c
+	$(CC) -O2 -Wall -Wextra -o demo-load demo-load.c -lpthread -ldl -lm
+
 portable:
 	$(CC) $(CFLAGS_PORTABLE) -o $(TARGET) nv-monitor.c $(LDFLAGS)
 
@@ -18,7 +21,7 @@ test: test_meminfo.c
 	./test_meminfo
 
 clean:
-	rm -f $(TARGET) test_meminfo
+	rm -f $(TARGET) demo-load test_meminfo
 
 install: $(TARGET)
 	install -m 755 $(TARGET) /usr/local/bin/

@@ -143,6 +143,15 @@ scrape_configs:
 
 No new dependencies are required — the exporter uses POSIX sockets and adds ~128 KB of memory overhead.
 
+## Synthetic Load Testing
+
+A companion tool `demo-load` generates sinusoidal CPU and GPU loads for visual testing and multi-node validation — no bulky benchmarking tools required. See [DEMO-LOAD.md](DEMO-LOAD.md) for details.
+
+```bash
+make demo-load
+./demo-load --gpu          # CPU + GPU sinusoidal load
+```
+
 ## Requirements
 
 - Linux (reads from `/proc` and `/sys`)
