@@ -1416,7 +1416,8 @@ static void draw_screen(void) {
             for (unsigned int i = 0; i < n_comp && n_all < MAX_GPU_PROCS * 2; i++) {
                 GpuProc *p = &all_procs[n_all++];
                 p->pid = comp_procs[i].pid;
-                p->mem_bytes = comp_procs[i].usedGpuMemory;
+                unsigned long long mem = comp_procs[i].usedGpuMemory;
+                p->mem_bytes = (mem == 0xFFFFFFFFFFFFFFFFULL) ? 0 : mem;
                 p->type = 'C';
                 p->cpu_pct = calc_proc_cpu_pct(p->pid);
                 get_proc_cmdline(p->pid, p->name, sizeof(p->name));
@@ -1430,7 +1431,8 @@ static void draw_screen(void) {
                 if (dup) continue;
                 GpuProc *p = &all_procs[n_all++];
                 p->pid = gfx_procs[i].pid;
-                p->mem_bytes = gfx_procs[i].usedGpuMemory;
+                unsigned long long mem = gfx_procs[i].usedGpuMemory;
+                p->mem_bytes = (mem == 0xFFFFFFFFFFFFFFFFULL) ? 0 : mem;
                 p->type = 'G';
                 p->cpu_pct = calc_proc_cpu_pct(p->pid);
                 get_proc_cmdline(p->pid, p->name, sizeof(p->name));
@@ -1457,7 +1459,7 @@ static void draw_screen(void) {
 
             if (n_all > 0) {
                 attron(A_BOLD | COLOR_PAIR(7));
-                mvprintw(y, 1, "  %-8s %-12s %-4s %6s %-12s %s",
+                mvprintw(y, 1, "  %-8s %-12s %-4s %7s %-12s %s",
                          "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
                 attroff(A_BOLD | COLOR_PAIR(7));
                 y++;
@@ -1465,9 +1467,12 @@ static void draw_screen(void) {
                 for (int i = 0; i < n_all && y < rows - 2; i++) {
                     GpuProc *p = &all_procs[i];
                     char mb[16];
-                    fmt_bytes(p->mem_bytes, mb, sizeof(mb));
+                    if (p->mem_bytes > 0)
+                        fmt_bytes(p->mem_bytes, mb, sizeof(mb));
+                    else
+                        snprintf(mb, sizeof(mb), "N/A");
 
-                    int name_max = cols - 53;
+                    int name_max = cols - 54;
                     if (name_max < 10) name_max = 10;
                     char truncname[256];
                     snprintf(truncname, sizeof(truncname), "%-.*s", name_max, p->name);
@@ -1477,7 +1482,7 @@ static void draw_screen(void) {
                     attron(COLOR_PAIR(pc));
                     printw("%-4c", p->type);
                     attroff(COLOR_PAIR(pc));
-                    printw(" %5.1f%% %-12s %s", p->cpu_pct, mb, truncname);
+                    printw(" %6.1f%% %-12s %s", p->cpu_pct, mb, truncname);
                     y++;
                 }
 
@@ -1490,7 +1495,7 @@ static void draw_screen(void) {
                 double other_cpu = total_cpu - gpu_proc_cpu;
                 if (other_cpu < 0) other_cpu = 0;
                 attron(COLOR_PAIR(8));
-                mvprintw(y, 1, "  %-8s %-12s %-4s %5.1f%%",
+                mvprintw(y, 1, "  %-8s %-12s %-4s %6.1f%%",
                          "", "", "", other_cpu);
                 printw(" %-12s %s", "", "(other processes)");
                 attroff(COLOR_PAIR(8));
