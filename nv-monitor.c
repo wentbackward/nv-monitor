@@ -25,6 +25,10 @@
 #include <locale.h>
 #include <sys/sysinfo.h>
 #include <getopt.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <pthread.h>
 
 /* ── NVML types (loaded dynamically) ────────────────────────────────── */
 
@@ -197,6 +201,7 @@ static double last_gpu_util = 0; /* captured during draw for history */
 static FILE *log_fp = NULL;
 static int   log_interval_ms = 1000;
 static int   no_ui = 0;
+static int   prom_port = 0;  /* Prometheus metrics port (0 = disabled) */
 
 /* ── Signal handler ─────────────────────────────────────────────────── */
 
@@ -742,6 +747,336 @@ static void log_csv_row(FILE *f) {
     fflush(f);
 }
 
+/* ── Prometheus metrics exporter ────────────────────────────────────── */
+
+static int   prom_sock = -1;
+static pthread_t prom_thread;
+
+#define PROM_BUF_SIZE 8192
+#define PROM_MAX_GPUS 8
+
+typedef struct {
+    int      valid;
+    char     name[96];
+    unsigned int util_gpu;
+    unsigned int temp;
+    unsigned int power_mw;
+    int      has_power;
+    unsigned int clk_gfx, clk_mem;
+    unsigned long long mem_total, mem_used;
+    int      has_mem;
+    unsigned int fan;
+    int      has_fan;
+    unsigned int enc, dec;
+    int      has_enc, has_dec;
+} PromGpu;
+
+/* Format all metrics into buf. Returns bytes written. */
+static int format_metrics(char *buf, int buflen) {
+    int off = 0;
+
+    #define PM(...) do { \
+        int _n = snprintf(buf + off, (size_t)(buflen - off), __VA_ARGS__); \
+        if (_n > 0) { \
+            if (_n >= buflen - off) { off = buflen - 1; goto pm_done; } \
+            off += _n; \
+        } \
+    } while(0)
+
+    /* Build info */
+    PM("# HELP nv_build_info nv-monitor version\n"
+       "# TYPE nv_build_info gauge\n"
+       "nv_build_info{version=\"%s\"} 1\n", VERSION);
+
+    /* Uptime */
+    struct sysinfo si;
+    if (sysinfo(&si) == 0) {
+        PM("# HELP nv_uptime_seconds System uptime\n"
+           "# TYPE nv_uptime_seconds gauge\n"
+           "nv_uptime_seconds %ld\n", si.uptime);
+    }
+
+    /* Load average */
+    double l1 = 0, l5 = 0, l15 = 0;
+    get_loadavg(&l1, &l5, &l15);
+    PM("# HELP nv_load_average System load average\n"
+       "# TYPE nv_load_average gauge\n"
+       "nv_load_average{interval=\"1m\"} %.2f\n"
+       "nv_load_average{interval=\"5m\"} %.2f\n"
+       "nv_load_average{interval=\"15m\"} %.2f\n", l1, l5, l15);
+
+    /* CPU usage */
+    PM("# HELP nv_cpu_usage_percent CPU utilization\n"
+       "# TYPE nv_cpu_usage_percent gauge\n"
+       "nv_cpu_usage_percent{cpu=\"overall\"} %.1f\n", cpu_pct[0]);
+    for (int i = 1; i <= num_cpus; i++) {
+        const char *lbl = cpu_part_label(i - 1);
+        if (lbl[0])
+            PM("nv_cpu_usage_percent{cpu=\"%d\",type=\"%s\"} %.1f\n",
+               i - 1, lbl, cpu_pct[i]);
+        else
+            PM("nv_cpu_usage_percent{cpu=\"%d\"} %.1f\n",
+               i - 1, cpu_pct[i]);
+    }
+
+    /* CPU temperature */
+    PM("# HELP nv_cpu_temperature_celsius CPU temperature\n"
+       "# TYPE nv_cpu_temperature_celsius gauge\n"
+       "nv_cpu_temperature_celsius %d\n", read_cpu_temp());
+
+    /* CPU frequency */
+    PM("# HELP nv_cpu_frequency_mhz CPU frequency\n"
+       "# TYPE nv_cpu_frequency_mhz gauge\n"
+       "nv_cpu_frequency_mhz %d\n", read_cpu_freq_mhz());
+
+    /* Memory */
+    MemInfo mi;
+    read_meminfo(&mi);
+    PM("# HELP nv_memory_total_bytes Total system memory\n"
+       "# TYPE nv_memory_total_bytes gauge\n"
+       "nv_memory_total_bytes %llu\n"
+       "# HELP nv_memory_used_bytes Application memory used\n"
+       "# TYPE nv_memory_used_bytes gauge\n"
+       "nv_memory_used_bytes %llu\n"
+       "# HELP nv_memory_bufcache_bytes Buffer and cache memory\n"
+       "# TYPE nv_memory_bufcache_bytes gauge\n"
+       "nv_memory_bufcache_bytes %llu\n",
+       mi.total_kb * 1024ULL, mi.app_kb * 1024ULL, mi.bufcache_kb * 1024ULL);
+
+    if (mi.swap_total_kb > 0) {
+        PM("# HELP nv_swap_total_bytes Total swap\n"
+           "# TYPE nv_swap_total_bytes gauge\n"
+           "nv_swap_total_bytes %llu\n"
+           "# HELP nv_swap_used_bytes Swap used\n"
+           "# TYPE nv_swap_used_bytes gauge\n"
+           "nv_swap_used_bytes %llu\n",
+           mi.swap_total_kb * 1024ULL, mi.swap_used_kb * 1024ULL);
+    }
+
+    /* GPU — collect data first, then format grouped by metric family */
+    PromGpu gpus[PROM_MAX_GPUS];
+    int n_gpus = 0;
+
+    if (nvml_ok) {
+        unsigned int dev_count = 0;
+        pNvmlDeviceGetCount(&dev_count);
+
+        for (unsigned int d = 0; d < dev_count && (int)d < PROM_MAX_GPUS; d++) {
+            PromGpu *g = &gpus[n_gpus];
+            memset(g, 0, sizeof(*g));
+            nvmlDevice_t dev;
+            if (pNvmlDeviceGetHandleByIndex(d, &dev) != NVML_SUCCESS) continue;
+            g->valid = 1;
+            pNvmlDeviceGetName(dev, g->name, sizeof(g->name));
+
+            nvmlUtilization_t util = {0};
+            pNvmlDeviceGetUtilizationRates(dev, &util);
+            g->util_gpu = util.gpu;
+
+            pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &g->temp);
+
+            g->has_power = (pNvmlDeviceGetPowerUsage &&
+                            pNvmlDeviceGetPowerUsage(dev, &g->power_mw) == NVML_SUCCESS);
+
+            if (pNvmlDeviceGetClockInfo) {
+                pNvmlDeviceGetClockInfo(dev, NVML_CLOCK_GRAPHICS, &g->clk_gfx);
+                pNvmlDeviceGetClockInfo(dev, NVML_CLOCK_MEM, &g->clk_mem);
+            }
+
+            nvmlMemory_t mem = {0};
+            g->has_mem = (pNvmlDeviceGetMemoryInfo &&
+                          pNvmlDeviceGetMemoryInfo(dev, &mem) == NVML_SUCCESS &&
+                          mem.total > 0);
+            if (g->has_mem) { g->mem_total = mem.total; g->mem_used = mem.used; }
+
+            unsigned int period;
+            g->has_fan = (pNvmlDeviceGetFanSpeed &&
+                          pNvmlDeviceGetFanSpeed(dev, &g->fan) == NVML_SUCCESS);
+            g->has_enc = (pNvmlDeviceGetEncoderUtilization &&
+                          pNvmlDeviceGetEncoderUtilization(dev, &g->enc, &period) == NVML_SUCCESS);
+            g->has_dec = (pNvmlDeviceGetDecoderUtilization &&
+                          pNvmlDeviceGetDecoderUtilization(dev, &g->dec, &period) == NVML_SUCCESS);
+            n_gpus++;
+        }
+    }
+
+    if (n_gpus > 0) {
+        PM("# HELP nv_gpu_info GPU device information\n"
+           "# TYPE nv_gpu_info gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            PM("nv_gpu_info{gpu=\"%d\",name=\"%s\"} 1\n", d, gpus[d].name);
+
+        PM("# HELP nv_gpu_utilization_percent GPU compute utilization\n"
+           "# TYPE nv_gpu_utilization_percent gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            PM("nv_gpu_utilization_percent{gpu=\"%d\"} %u\n", d, gpus[d].util_gpu);
+
+        PM("# HELP nv_gpu_temperature_celsius GPU temperature\n"
+           "# TYPE nv_gpu_temperature_celsius gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            PM("nv_gpu_temperature_celsius{gpu=\"%d\"} %u\n", d, gpus[d].temp);
+
+        PM("# HELP nv_gpu_power_watts GPU power draw\n"
+           "# TYPE nv_gpu_power_watts gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_power)
+                PM("nv_gpu_power_watts{gpu=\"%d\"} %.1f\n", d, gpus[d].power_mw / 1000.0);
+
+        PM("# HELP nv_gpu_clock_mhz GPU clock speed\n"
+           "# TYPE nv_gpu_clock_mhz gauge\n");
+        for (int d = 0; d < n_gpus; d++) {
+            if (gpus[d].clk_gfx)
+                PM("nv_gpu_clock_mhz{gpu=\"%d\",type=\"graphics\"} %u\n", d, gpus[d].clk_gfx);
+            if (gpus[d].clk_mem)
+                PM("nv_gpu_clock_mhz{gpu=\"%d\",type=\"memory\"} %u\n", d, gpus[d].clk_mem);
+        }
+
+        PM("# HELP nv_gpu_memory_total_bytes GPU memory total\n"
+           "# TYPE nv_gpu_memory_total_bytes gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_mem)
+                PM("nv_gpu_memory_total_bytes{gpu=\"%d\"} %llu\n", d, gpus[d].mem_total);
+
+        PM("# HELP nv_gpu_memory_used_bytes GPU memory used\n"
+           "# TYPE nv_gpu_memory_used_bytes gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_mem)
+                PM("nv_gpu_memory_used_bytes{gpu=\"%d\"} %llu\n", d, gpus[d].mem_used);
+
+        PM("# HELP nv_gpu_fan_speed_percent GPU fan speed\n"
+           "# TYPE nv_gpu_fan_speed_percent gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_fan)
+                PM("nv_gpu_fan_speed_percent{gpu=\"%d\"} %u\n", d, gpus[d].fan);
+
+        PM("# HELP nv_gpu_encoder_utilization_percent GPU encoder utilization\n"
+           "# TYPE nv_gpu_encoder_utilization_percent gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_enc)
+                PM("nv_gpu_encoder_utilization_percent{gpu=\"%d\"} %u\n", d, gpus[d].enc);
+
+        PM("# HELP nv_gpu_decoder_utilization_percent GPU decoder utilization\n"
+           "# TYPE nv_gpu_decoder_utilization_percent gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_dec)
+                PM("nv_gpu_decoder_utilization_percent{gpu=\"%d\"} %u\n", d, gpus[d].dec);
+    }
+
+pm_done:
+    #undef PM
+    return off;
+}
+
+/* Minimal HTTP handler for a single connection */
+static void prom_handle(int fd) {
+    /* Set timeouts to prevent stalled clients from blocking the server */
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    char req[512];
+    int n = (int)recv(fd, req, sizeof(req) - 1, 0);
+    if (n <= 0) return;
+    req[n] = '\0';
+
+    if (strstr(req, "GET /metrics")) {
+        char body[PROM_BUF_SIZE];
+        int bodylen = format_metrics(body, sizeof(body));
+
+        char hdr[128];
+        int hlen = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n", bodylen);
+
+        send(fd, hdr, hlen, MSG_NOSIGNAL);
+        send(fd, body, bodylen, MSG_NOSIGNAL);
+    } else {
+        /* Landing page with link to /metrics */
+        static const char resp[] =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Connection: close\r\n\r\n"
+            "<html><body><h1>nv-monitor</h1>"
+            "<p><a href=\"/metrics\">Metrics</a></p>"
+            "</body></html>\n";
+        send(fd, resp, sizeof(resp) - 1, MSG_NOSIGNAL);
+    }
+}
+
+/* Server thread — blocks on poll() with 1s timeout for clean shutdown */
+static void *prom_server(void *arg) {
+    (void)arg;
+    while (!g_quit) {
+        struct pollfd pfd = { .fd = prom_sock, .events = POLLIN };
+        if (poll(&pfd, 1, 1000) <= 0) continue;
+
+        int fd = accept(prom_sock, NULL, NULL);
+        if (fd < 0) continue;
+        prom_handle(fd);
+        close(fd);
+    }
+    return NULL;
+}
+
+static int prom_start(void) {
+    if (!prom_port) return 0;
+
+    prom_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (prom_sock < 0) {
+        perror("prometheus: socket");
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(prom_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons((uint16_t)prom_port),
+        .sin_addr.s_addr = INADDR_ANY,
+    };
+
+    if (bind(prom_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("prometheus: bind");
+        close(prom_sock);
+        prom_sock = -1;
+        return -1;
+    }
+
+    if (listen(prom_sock, 4) < 0) {
+        perror("prometheus: listen");
+        close(prom_sock);
+        prom_sock = -1;
+        return -1;
+    }
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 131072); /* 128 KB — minimal for aarch64 */
+
+    if (pthread_create(&prom_thread, &attr, prom_server, NULL) != 0) {
+        perror("prometheus: pthread_create");
+        close(prom_sock);
+        prom_sock = -1;
+        pthread_attr_destroy(&attr);
+        return -1;
+    }
+
+    pthread_attr_destroy(&attr);
+    fprintf(stderr, "Prometheus metrics at http://0.0.0.0:%d/metrics\n", prom_port);
+    return 0;
+}
+
+static void prom_stop(void) {
+    if (prom_sock >= 0) {
+        pthread_join(prom_thread, NULL);
+        close(prom_sock);
+        prom_sock = -1;
+    }
+}
+
 /* ── Usage ──────────────────────────────────────────────────────────── */
 
 static void print_usage(const char *prog) {
@@ -751,7 +1086,8 @@ static void print_usage(const char *prog) {
         "Options:\n"
         "  -l FILE   Log statistics to CSV file\n"
         "  -i MS     Log interval in milliseconds (default: 1000)\n"
-        "  -n        No UI (headless mode, requires -l)\n"
+        "  -n        No UI (headless mode, requires -l or -p)\n"
+        "  -p PORT   Expose Prometheus metrics on PORT\n"
         "  -r MS     UI refresh interval in milliseconds (default: 1000)\n"
         "  -v        Show version\n"
         "  -h        Show this help\n"
@@ -1170,11 +1506,12 @@ int main(int argc, char *argv[]) {
 
     const char *log_path = NULL;
     int opt;
-    while ((opt = getopt(argc, argv, "l:i:nr:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "l:i:np:r:vh")) != -1) {
         switch (opt) {
         case 'l': log_path = optarg; break;
         case 'i': log_interval_ms = atoi(optarg); break;
         case 'n': no_ui = 1; break;
+        case 'p': prom_port = atoi(optarg); break;
         case 'r': delay_ms = atoi(optarg); break;
         case 'v': printf("nv-monitor %s\n", VERSION); return 0;
         case 'h': print_usage(argv[0]); return 0;
@@ -1182,8 +1519,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (no_ui && !log_path) {
-        fprintf(stderr, "Error: -n (no UI) requires -l <file>\n");
+    if (no_ui && !log_path && !prom_port) {
+        fprintf(stderr, "Error: -n (no UI) requires -l <file> or -p <port>\n");
         return 1;
     }
     if (log_interval_ms < 100) log_interval_ms = 100;
@@ -1213,14 +1550,22 @@ int main(int argc, char *argv[]) {
     if (log_fp)
         log_csv_header(log_fp);
 
+    /* Start Prometheus exporter if requested */
+    if (prom_port && prom_start() != 0)
+        return 1;
+
     if (no_ui) {
         /* ── Headless mode ──────────────────────────────────────────── */
-        fprintf(stderr, "Logging to %s every %dms (Ctrl+C to stop)\n",
-                log_path, log_interval_ms);
+        int headless_interval = log_fp ? log_interval_ms : delay_ms;
+        if (log_fp)
+            fprintf(stderr, "Logging to %s every %dms (Ctrl+C to stop)\n",
+                    log_path, headless_interval);
+        else
+            fprintf(stderr, "Running headless (Ctrl+C to stop)\n");
         while (!g_quit) {
             compute_cpu_usage();
-            log_csv_row(log_fp);
-            usleep(log_interval_ms * 1000);
+            if (log_fp) log_csv_row(log_fp);
+            usleep(headless_interval * 1000);
         }
         fprintf(stderr, "\nStopped.\n");
     } else {
@@ -1285,6 +1630,7 @@ int main(int argc, char *argv[]) {
         endwin();
     }
 
+    prom_stop();
     if (log_fp) fclose(log_fp);
     if (nvml_ok && pNvmlShutdown) pNvmlShutdown();
     if (nvml_handle) dlclose(nvml_handle);

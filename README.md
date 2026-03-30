@@ -64,6 +64,8 @@ make
 ./nv-monitor -l stats.csv -i 5000      # TUI + log every 5s
 ./nv-monitor -n -l stats.csv -i 500    # Headless, log every 500ms
 ./nv-monitor -r 2000                   # TUI refreshing every 2s
+./nv-monitor -p 9101                   # TUI + Prometheus metrics on :9101
+./nv-monitor -n -p 9101                # Headless Prometheus exporter
 ```
 
 Or install system-wide:
@@ -74,14 +76,15 @@ sudo make install
 
 ### Command-line options
 
-| Flag      | Description                          | Default |
-|-----------|--------------------------------------|---------|
-| `-l FILE` | Log statistics to CSV file           | off     |
-| `-i MS`   | Log interval in milliseconds         | 1000    |
-| `-n`      | Headless mode (no TUI, requires `-l`)| off     |
-| `-r MS`   | UI refresh interval in milliseconds  | 1000    |
-| `-v`      | Show version                         |         |
-| `-h`      | Show help                            |         |
+| Flag      | Description                                | Default |
+|-----------|--------------------------------------------|---------|
+| `-l FILE` | Log statistics to CSV file                 | off     |
+| `-i MS`   | Log interval in milliseconds               | 1000    |
+| `-n`      | Headless mode (no TUI, requires `-l`/`-p`) | off     |
+| `-p PORT` | Expose Prometheus metrics on PORT          | off     |
+| `-r MS`   | UI refresh interval in milliseconds        | 1000    |
+| `-v`      | Show version                               |         |
+| `-h`      | Show help                                  |         |
 
 ### Interactive controls
 
@@ -90,6 +93,53 @@ sudo make install
 | `q`/Esc | Quit                                |
 | `s`     | Toggle sort (GPU memory / PID)      |
 | `+`/`-` | Adjust refresh rate (250ms steps)   |
+
+## Prometheus Metrics
+
+Pass `-p PORT` to expose a Prometheus-compatible metrics endpoint:
+
+```bash
+./nv-monitor -p 9101              # TUI + metrics at http://localhost:9101/metrics
+./nv-monitor -n -p 9101           # Pure headless exporter
+curl -s localhost:9101/metrics     # Check it works
+```
+
+### Available metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nv_build_info` | gauge | `version` | nv-monitor version |
+| `nv_uptime_seconds` | gauge | | System uptime |
+| `nv_load_average` | gauge | `interval` | Load average (1m, 5m, 15m) |
+| `nv_cpu_usage_percent` | gauge | `cpu`, `type` | Per-core CPU utilization (type = ARM core: X925, X725, etc.) |
+| `nv_cpu_temperature_celsius` | gauge | | CPU temperature |
+| `nv_cpu_frequency_mhz` | gauge | | CPU frequency |
+| `nv_memory_total_bytes` | gauge | | Total system memory |
+| `nv_memory_used_bytes` | gauge | | Application memory used |
+| `nv_memory_bufcache_bytes` | gauge | | Buffer and cache memory |
+| `nv_swap_total_bytes` | gauge | | Total swap |
+| `nv_swap_used_bytes` | gauge | | Swap used |
+| `nv_gpu_info` | gauge | `gpu`, `name` | GPU device name |
+| `nv_gpu_utilization_percent` | gauge | `gpu` | GPU compute utilization |
+| `nv_gpu_temperature_celsius` | gauge | `gpu` | GPU temperature |
+| `nv_gpu_power_watts` | gauge | `gpu` | GPU power draw |
+| `nv_gpu_clock_mhz` | gauge | `gpu`, `type` | GPU clock speed (graphics, memory) |
+| `nv_gpu_memory_total_bytes` | gauge | `gpu` | GPU memory total |
+| `nv_gpu_memory_used_bytes` | gauge | `gpu` | GPU memory used |
+| `nv_gpu_fan_speed_percent` | gauge | `gpu` | Fan speed |
+| `nv_gpu_encoder_utilization_percent` | gauge | `gpu` | Hardware encoder utilization |
+| `nv_gpu_decoder_utilization_percent` | gauge | `gpu` | Hardware decoder utilization |
+
+### Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: 'nv-monitor'
+    static_configs:
+      - targets: ['dgx-spark:9101']
+```
+
+No new dependencies are required — the exporter uses POSIX sockets and adds ~128 KB of memory overhead.
 
 ## Requirements
 
