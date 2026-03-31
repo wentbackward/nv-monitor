@@ -12,12 +12,13 @@ nv-monitor is a single-file C terminal system monitor for the NVIDIA DGX Spark (
 make          # builds nv-monitor binary (-O3 -march=native)
 make portable # builds without -march=native (for CI/distribution)
 make test     # builds and runs unit tests
+make install-user # installs to ~/.local/bin by default
 make clean    # removes binaries
 ```
 
-Direct compilation: `gcc -O2 -Wall -Wextra -std=gnu11 -o nv-monitor nv-monitor.c -lncursesw -ldl -lpthread`
+Direct compilation: `cc -O2 -Wall -Wextra -std=gnu11 -o nv-monitor nv-monitor.c -lncursesw -ldl -lpthread`
 
-Dependencies: `build-essential`, `libncurses-dev`
+Dependencies: a C compiler (`cc`, `gcc`, or `clang`) and `libncurses-dev`
 
 Works on both **aarch64** (DGX Spark) and **x86_64**. On x86, ARM core type labels are omitted; everything else works identically.
 

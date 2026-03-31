@@ -60,12 +60,18 @@ For the reckless among you, there's a [binary release](https://github.com/wentba
 
 ## Building
 
-Requires `gcc` and `libncurses-dev`:
+Requires a C compiler (`cc`, `gcc`, or `clang`) and `libncurses-dev`:
 
 ```bash
 sudo apt install build-essential libncurses-dev
 make
 ```
+
+`make` builds an optimized binary for the current machine. Use `make portable`
+for a generic build without `-march=native`.
+
+If you pass `CFLAGS=...`, those flags are added on top of the project defaults.
+Use `make portable` rather than trying to strip `-march=native` via `CFLAGS`.
 
 ## Usage
 
@@ -83,6 +89,19 @@ Or install system-wide:
 
 ```bash
 sudo make install
+```
+
+Or install just for your user:
+
+```bash
+make install-user
+```
+
+`install-user` defaults to `~/.local/bin`. You can override the destination, for example:
+
+```bash
+make install-user USER_BINDIR="$HOME/.bin"
+make install BINDIR="$HOME/.bin"
 ```
 
 ### Command-line options
