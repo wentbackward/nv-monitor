@@ -1,9 +1,10 @@
-CC      = gcc
-VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-CFLAGS  = -O3 -march=native -flto -Wall -Wextra -std=gnu11 -DVERSION='"$(VERSION)"'
+CC      ?= cc
+VERSION  = $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+CFLAGS   = -O3 -march=native -flto -Wall -Wextra -std=gnu11 -DVERSION='"$(VERSION)"'
 CFLAGS_PORTABLE = -O3 -flto -Wall -Wextra -std=gnu11 -DVERSION='"$(VERSION)"'
-LDFLAGS = -lncursesw -ldl -lpthread
-TARGET  = nv-monitor
+LDFLAGS  = -lncursesw -ldl -lpthread
+PREFIX   ?= /usr/local
+TARGET   = nv-monitor
 
 all: $(TARGET)
 
@@ -24,6 +25,11 @@ clean:
 	rm -f $(TARGET) demo-load test_meminfo
 
 install: $(TARGET)
-	install -m 755 $(TARGET) /usr/local/bin/
+	install -d $(PREFIX)/bin
+	install -m 755 $(TARGET) $(PREFIX)/bin/
 
-.PHONY: all portable test clean install
+install-user: $(TARGET)
+	install -d $(HOME)/.local/bin
+	install -m 755 $(TARGET) $(HOME)/.local/bin/
+
+.PHONY: all portable test clean install install-user
