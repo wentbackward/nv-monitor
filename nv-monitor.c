@@ -656,11 +656,14 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
     printw(" history");
     attroff(COLOR_PAIR(8));
 
-    /* Fixed column width based on max samples — prevents rescaling as history fills */
+    /* Fixed column width based on max samples — prevents rescaling as history fills.
+     * Each sample: cpu_w + gpu_w + 1 gap char */
     int col_w = avail_w / HISTORY_LEN;
-    if (col_w < 2) col_w = 2;
-    int cpu_w = col_w / 2;
-    int gpu_w = col_w - cpu_w;
+    if (col_w < 3) col_w = 3;
+    int gap = 1;
+    int bar_w = col_w - gap;
+    int cpu_w = bar_w / 2;
+    int gpu_w = bar_w - cpu_w;
 
     int visible = n;
 
@@ -678,9 +681,6 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
 
         int x = x_start + s * col_w;
 
-        int cpu_color = cpu_val > 90 ? 1 : (cpu_val > 60 ? 3 : 2);
-        int gpu_color = gpu_val > 90 ? 1 : (gpu_val > 60 ? 3 : 6);
-
         for (int row = 0; row < chart_h; row++) {
             int ry = top_y + chart_h - 1 - row;
             int row_base = row * 8;
@@ -694,14 +694,16 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
             if (gpu_fill > 8) gpu_fill = 8;
 
             move(ry, x);
-            attron(COLOR_PAIR(cpu_color));
+            attron(COLOR_PAIR(2)); /* green = CPU */
             for (int c = 0; c < cpu_w; c++)
                 printw("%s", block_chars[cpu_fill]);
-            attroff(COLOR_PAIR(cpu_color));
-            attron(COLOR_PAIR(gpu_color));
+            attroff(COLOR_PAIR(2));
+            attron(COLOR_PAIR(6)); /* cyan = GPU */
             for (int c = 0; c < gpu_w; c++)
                 printw("%s", block_chars[gpu_fill]);
-            attroff(COLOR_PAIR(gpu_color));
+            attroff(COLOR_PAIR(6));
+            /* gap between samples */
+            printw(" ");
         }
     }
 
@@ -709,6 +711,17 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
     attron(COLOR_PAIR(8));
     mvprintw(top_y, margin, "100%%");
     mvprintw(top_y + chart_h - 1, margin, "  0%%");
+
+    /* X-axis: t-N labels (seconds ago), right-aligned with 0 on the right */
+    int x_row = top_y + chart_h;
+    for (int t = 0; t < HISTORY_LEN; t += 5) {
+        int s = HISTORY_LEN - 1 - t; /* sample index from right */
+        int x = x_start + s * col_w;
+        if (x >= left_x && x < right_x - 2)
+            mvprintw(x_row, x, "%-3d", t);
+    }
+    /* label */
+    mvprintw(x_row, margin, "  t=");
     attroff(COLOR_PAIR(8));
 }
 
@@ -1508,7 +1521,7 @@ static void draw_screen(void) {
     record_history(cpu_pct[0], last_gpu_util);
     {
         int chart_h = 5;
-        int chart_top = rows - 2 - chart_h;
+        int chart_top = rows - 3 - chart_h; /* -3: footer + x-axis + gap */
         if (chart_top > y + 1 && cols > 20) {
             draw_history_chart(chart_top, cols, chart_h);
         }
