@@ -732,6 +732,28 @@ static void record_history(double cpu, double gpu) {
     if (history_count < HISTORY_LEN) history_count++;
 }
 
+/* ── RDMA types (used by CSV logging and Prometheus) ───────────────── */
+
+#define MAX_RDMA_PORTS 16
+
+typedef struct {
+    char device[64];
+    int  port;
+    char state[32];
+    char rate[32];
+    unsigned long long xmit_bytes;
+    unsigned long long recv_bytes;
+    unsigned long long xmit_pkts;
+    unsigned long long recv_pkts;
+    unsigned long long errors;
+    double xmit_bytes_sec;
+    double recv_bytes_sec;
+} RdmaPort;
+
+static RdmaPort rdma_ports[MAX_RDMA_PORTS];
+static int       rdma_count = 0;
+static int       rdma_available = 0;
+
 /* ── CSV logging ────────────────────────────────────────────────────── */
 
 static void log_csv_header(FILE *f) {
@@ -742,6 +764,10 @@ static void log_csv_header(FILE *f) {
     fprintf(f, ",mem_used_kb,mem_total_kb,mem_bufcache_kb");
     fprintf(f, ",swap_used_kb,swap_total_kb");
     fprintf(f, ",gpu_util_pct,gpu_temp_c,gpu_power_mw,gpu_clock_mhz");
+    for (int i = 0; i < rdma_count; i++)
+        fprintf(f, ",rdma_%s_p%d_xmit_Bps,rdma_%s_p%d_recv_Bps",
+                rdma_ports[i].device, rdma_ports[i].port,
+                rdma_ports[i].device, rdma_ports[i].port);
     fprintf(f, "\n");
     fflush(f);
 }
@@ -795,8 +821,124 @@ static void log_csv_row(FILE *f) {
         fprintf(f, ",,,,");
     }
 
+    for (int i = 0; i < rdma_count; i++)
+        fprintf(f, ",%.0f,%.0f", rdma_ports[i].xmit_bytes_sec, rdma_ports[i].recv_bytes_sec);
+
     fprintf(f, "\n");
     fflush(f);
+}
+
+/* ── RDMA / InfiniBand monitoring ───────────────────────────────────── */
+
+static unsigned long long rdma_prev_xmit[MAX_RDMA_PORTS];
+static unsigned long long rdma_prev_recv[MAX_RDMA_PORTS];
+static struct timespec    rdma_prev_time;
+static int                rdma_prev_valid = 0;
+
+static unsigned long long read_sysfs_ull(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    unsigned long long val = 0;
+    (void)!fscanf(f, "%llu", &val);
+    fclose(f);
+    return val;
+}
+
+static void read_sysfs_str(const char *path, char *buf, int len) {
+    FILE *f = fopen(path, "r");
+    if (!f) { buf[0] = '\0'; return; }
+    if (!fgets(buf, len, f)) buf[0] = '\0';
+    fclose(f);
+    buf[strcspn(buf, "\n\r")] = '\0';
+}
+
+static void read_rdma_ports(void) {
+    DIR *ib_dir = opendir("/sys/class/infiniband");
+    if (!ib_dir) { rdma_available = 0; rdma_count = 0; return; }
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double dt = 0;
+    if (rdma_prev_valid) {
+        dt = (now.tv_sec - rdma_prev_time.tv_sec) +
+             (now.tv_nsec - rdma_prev_time.tv_nsec) / 1e9;
+        if (dt <= 0) dt = 1;
+    }
+
+    rdma_available = 1;
+    int idx = 0;
+    struct dirent *dev_ent;
+    while ((dev_ent = readdir(ib_dir)) && idx < MAX_RDMA_PORTS) {
+        if (dev_ent->d_name[0] == '.') continue;
+
+        /* Scan ports (typically 1-2) */
+        for (int p = 1; p <= 2 && idx < MAX_RDMA_PORTS; p++) {
+            char path[256];
+            snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/state", dev_ent->d_name, p);
+            FILE *test = fopen(path, "r");
+            if (!test) continue;
+            fclose(test);
+
+            RdmaPort *r = &rdma_ports[idx];
+            snprintf(r->device, sizeof(r->device), "%s", dev_ent->d_name);
+            r->port = p;
+
+            read_sysfs_str(path, r->state, sizeof(r->state));
+            /* Strip numeric prefix like "4: ACTIVE" -> "ACTIVE" */
+            char *colon = strchr(r->state, ':');
+            if (colon) {
+                const char *s = colon + 1;
+                while (*s == ' ') s++;
+                memmove(r->state, s, strlen(s) + 1);
+            }
+
+            snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/rate", dev_ent->d_name, p);
+            read_sysfs_str(path, r->rate, sizeof(r->rate));
+
+            /* Counters — RDMA counters are in units of 4 bytes (32-bit words) for data */
+            snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/counters/port_xmit_data", dev_ent->d_name, p);
+            r->xmit_bytes = read_sysfs_ull(path) * 4;
+            snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/counters/port_rcv_data", dev_ent->d_name, p);
+            r->recv_bytes = read_sysfs_ull(path) * 4;
+            snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/counters/port_xmit_packets", dev_ent->d_name, p);
+            r->xmit_pkts = read_sysfs_ull(path);
+            snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/counters/port_rcv_packets", dev_ent->d_name, p);
+            r->recv_pkts = read_sysfs_ull(path);
+
+            /* Sum error counters */
+            r->errors = 0;
+            const char *err_counters[] = {
+                "symbol_error_counter", "port_rcv_errors",
+                "port_rcv_constraint_errors", "port_xmit_constraint_errors",
+                "link_error_recovery_counter", "link_downed_counter",
+                NULL
+            };
+            for (int e = 0; err_counters[e]; e++) {
+                snprintf(path, sizeof(path), "/sys/class/infiniband/%s/ports/%d/counters/%s",
+                         dev_ent->d_name, p, err_counters[e]);
+                r->errors += read_sysfs_ull(path);
+            }
+
+            /* Rate calculation */
+            if (rdma_prev_valid && idx < rdma_count) {
+                r->xmit_bytes_sec = (double)(r->xmit_bytes - rdma_prev_xmit[idx]) / dt;
+                r->recv_bytes_sec = (double)(r->recv_bytes - rdma_prev_recv[idx]) / dt;
+                if (r->xmit_bytes_sec < 0) r->xmit_bytes_sec = 0;
+                if (r->recv_bytes_sec < 0) r->recv_bytes_sec = 0;
+            } else {
+                r->xmit_bytes_sec = 0;
+                r->recv_bytes_sec = 0;
+            }
+
+            rdma_prev_xmit[idx] = r->xmit_bytes;
+            rdma_prev_recv[idx] = r->recv_bytes;
+            idx++;
+        }
+    }
+    closedir(ib_dir);
+    rdma_count = idx;
+    rdma_prev_time = now;
+    rdma_prev_valid = 1;
 }
 
 /* ── Prometheus metrics exporter ────────────────────────────────────── */
@@ -804,7 +946,7 @@ static void log_csv_row(FILE *f) {
 static int   prom_sock = -1;
 static pthread_t prom_thread;
 
-#define PROM_BUF_SIZE 8192
+#define PROM_BUF_SIZE 16384
 #define PROM_MAX_GPUS 8
 
 typedef struct {
@@ -1012,6 +1154,58 @@ static int format_metrics(char *buf, int buflen) {
         for (int d = 0; d < n_gpus; d++)
             if (gpus[d].has_dec)
                 PM("nv_gpu_decoder_utilization_percent{gpu=\"%d\"} %u\n", d, gpus[d].dec);
+    }
+
+    /* RDMA / InfiniBand */
+    if (rdma_available && rdma_count > 0) {
+        PM("# HELP nv_rdma_info RDMA port information\n"
+           "# TYPE nv_rdma_info gauge\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_info{device=\"%s\",port=\"%d\",state=\"%s\",rate=\"%s\"} 1\n",
+               rdma_ports[i].device, rdma_ports[i].port,
+               rdma_ports[i].state, rdma_ports[i].rate);
+
+        PM("# HELP nv_rdma_xmit_bytes_total Total bytes transmitted\n"
+           "# TYPE nv_rdma_xmit_bytes_total counter\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_xmit_bytes_total{device=\"%s\",port=\"%d\"} %llu\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].xmit_bytes);
+
+        PM("# HELP nv_rdma_recv_bytes_total Total bytes received\n"
+           "# TYPE nv_rdma_recv_bytes_total counter\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_recv_bytes_total{device=\"%s\",port=\"%d\"} %llu\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].recv_bytes);
+
+        PM("# HELP nv_rdma_xmit_packets_total Total packets transmitted\n"
+           "# TYPE nv_rdma_xmit_packets_total counter\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_xmit_packets_total{device=\"%s\",port=\"%d\"} %llu\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].xmit_pkts);
+
+        PM("# HELP nv_rdma_recv_packets_total Total packets received\n"
+           "# TYPE nv_rdma_recv_packets_total counter\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_recv_packets_total{device=\"%s\",port=\"%d\"} %llu\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].recv_pkts);
+
+        PM("# HELP nv_rdma_errors_total Total RDMA errors\n"
+           "# TYPE nv_rdma_errors_total counter\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_errors_total{device=\"%s\",port=\"%d\"} %llu\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].errors);
+
+        PM("# HELP nv_rdma_xmit_bytes_per_second Transmit throughput\n"
+           "# TYPE nv_rdma_xmit_bytes_per_second gauge\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_xmit_bytes_per_second{device=\"%s\",port=\"%d\"} %.0f\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].xmit_bytes_sec);
+
+        PM("# HELP nv_rdma_recv_bytes_per_second Receive throughput\n"
+           "# TYPE nv_rdma_recv_bytes_per_second gauge\n");
+        for (int i = 0; i < rdma_count; i++)
+            PM("nv_rdma_recv_bytes_per_second{device=\"%s\",port=\"%d\"} %.0f\n",
+               rdma_ports[i].device, rdma_ports[i].port, rdma_ports[i].recv_bytes_sec);
     }
 
 pm_done:
@@ -1606,6 +1800,9 @@ int main(int argc, char *argv[]) {
     usleep(100000); /* brief pause for first delta */
     compute_cpu_usage();
 
+    /* Detect RDMA/InfiniBand ports */
+    read_rdma_ports();
+
     /* Write CSV header after first CPU sample (so we know num_cpus) */
     if (log_fp)
         log_csv_header(log_fp);
@@ -1624,6 +1821,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Running headless (Ctrl+C to stop)\n");
         while (!g_quit) {
             compute_cpu_usage();
+            read_rdma_ports();
             if (log_fp) log_csv_row(log_fp);
             usleep(headless_interval * 1000);
         }
@@ -1654,6 +1852,7 @@ int main(int argc, char *argv[]) {
 
         while (!g_quit) {
             compute_cpu_usage();
+            read_rdma_ports();
             draw_screen();
 
             /* Log at log_interval_ms if logging enabled */
