@@ -35,6 +35,16 @@ Everything is in `nv-monitor.c` (~1640 lines). Key sections:
 - **CSV logging**: Opt-in via `-l FILE`, writes timestamped rows with all CPU/memory/GPU metrics. Shares derived calculations with the TUI via `meminfo_calc()`.
 - **Prometheus exporter**: Opt-in via `-p PORT`. Runs a minimal HTTP server on a dedicated pthread, serving OpenMetrics-formatted metrics at `/metrics`. Uses POSIX sockets with `poll()` for clean shutdown. Zero overhead when not enabled. Enables multi-machine monitoring via Prometheus/Grafana.
 
+## Locale / decimal separator (CRITICAL for Prometheus)
+
+The Prometheus exposition format **requires** decimal points (`1.23`), never commas (`1,23`). The TUI needs `setlocale(LC_ALL, "")` for Unicode support (ncursesw), but on systems with non-English locales (e.g. `es_ES.UTF-8`), `printf("%.2f")` produces commas, which causes Prometheus scrape parse errors (`up=0`).
+
+**Fix in code** (line ~1757): After `setlocale(LC_ALL, "")`, the code calls `setlocale(LC_NUMERIC, "C")` to force POSIX decimal formatting while preserving Unicode support for the TUI. This is the authoritative fix — it works regardless of the system locale or systemd environment.
+
+**Defense in depth**: The systemd service file also sets `Environment="LC_ALL=C"` as a belt-and-suspenders safeguard, but the code fix alone is sufficient.
+
+**Do not remove** the `setlocale(LC_NUMERIC, "C")` call. Any future code that formats floats for Prometheus or CSV output depends on it.
+
 ## DGX Spark specifics
 
 - The GB10 GPU uses **unified memory** shared with the Grace CPU. `nvmlDeviceGetMemoryInfo` returns NOT_SUPPORTED — the code detects this and shows "unified memory" instead of a VRAM bar.
