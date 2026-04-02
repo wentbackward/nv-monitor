@@ -1754,6 +1754,7 @@ static void draw_screen(void) {
 
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
+    setlocale(LC_NUMERIC, "C"); /* Force decimal point for Prometheus exposition format */
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
 
