@@ -204,6 +204,7 @@ static FILE *log_fp = NULL;
 static int   log_interval_ms = 1000;
 static int   no_ui = 0;
 static int   prom_port = 0;  /* Prometheus metrics port (0 = disabled) */
+static const char *prom_token = NULL; /* Bearer token for /metrics auth */
 
 /* ── Signal handler ─────────────────────────────────────────────────── */
 
@@ -1226,6 +1227,21 @@ static void prom_handle(int fd) {
     if (n <= 0) return;
     req[n] = '\0';
 
+    /* Bearer token auth if configured */
+    if (prom_token) {
+        char expected[512];
+        snprintf(expected, sizeof(expected), "Authorization: Bearer %s", prom_token);
+        if (!strstr(req, expected)) {
+            static const char resp_401[] =
+                "HTTP/1.1 401 Unauthorized\r\n"
+                "Content-Type: text/plain\r\n"
+                "Connection: close\r\n\r\n"
+                "Unauthorized\n";
+            send(fd, resp_401, sizeof(resp_401) - 1, MSG_NOSIGNAL);
+            return;
+        }
+    }
+
     if (strstr(req, "GET /metrics")) {
         char body[PROM_BUF_SIZE];
         int bodylen = format_metrics(body, sizeof(body));
@@ -1335,6 +1351,7 @@ static void print_usage(const char *prog) {
         "  -i MS     Log interval in milliseconds (default: 1000)\n"
         "  -n        No UI (headless mode, requires -l or -p)\n"
         "  -p PORT   Expose Prometheus metrics on PORT\n"
+        "  -t TOKEN  Require Bearer token for /metrics (or NV_MONITOR_TOKEN env)\n"
         "  -r MS     UI refresh interval in milliseconds (default: 1000)\n"
         "  -v        Show version\n"
         "  -h        Show this help\n"
@@ -1764,18 +1781,23 @@ int main(int argc, char *argv[]) {
 
     const char *log_path = NULL;
     int opt;
-    while ((opt = getopt(argc, argv, "l:i:np:r:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "l:i:np:t:r:vh")) != -1) {
         switch (opt) {
         case 'l': log_path = optarg; break;
         case 'i': log_interval_ms = atoi(optarg); break;
         case 'n': no_ui = 1; break;
         case 'p': prom_port = atoi(optarg); break;
+        case 't': prom_token = optarg; break;
         case 'r': delay_ms = atoi(optarg); break;
         case 'v': printf("nv-monitor %s\n", VERSION); return 0;
         case 'h': print_usage(argv[0]); return 0;
         default:  print_usage(argv[0]); return 1;
         }
     }
+
+    /* Token: CLI flag takes precedence, then env var */
+    if (!prom_token)
+        prom_token = getenv("NV_MONITOR_TOKEN");
 
     if (no_ui && !log_path && !prom_port) {
         fprintf(stderr, "Error: -n (no UI) requires -l <file> or -p <port>\n");

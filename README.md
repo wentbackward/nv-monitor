@@ -93,6 +93,7 @@ sudo make install
 | `-i MS`   | Log interval in milliseconds               | 1000    |
 | `-n`      | Headless mode (no TUI, requires `-l`/`-p`) | off     |
 | `-p PORT` | Expose Prometheus metrics on PORT          | off     |
+| `-t TOKEN`| Require Bearer token for `/metrics`        | off     |
 | `-r MS`   | UI refresh interval in milliseconds        | 1000    |
 | `-v`      | Show version                               |         |
 | `-h`      | Show help                                  |         |
@@ -146,11 +147,33 @@ curl -s localhost:9101/metrics     # Check it works
 ```yaml
 scrape_configs:
   - job_name: 'nv-monitor'
+    authorization:
+      credentials: 'my-secret-token'
     static_configs:
       - targets: ['dgx-spark:9101']
 ```
 
 No new dependencies are required — the exporter uses POSIX sockets and adds ~128 KB of memory overhead.
+
+### Security
+
+The exporter supports optional Bearer token authentication:
+
+```bash
+./nv-monitor -p 9101 -t my-secret-token           # token via CLI flag
+NV_MONITOR_TOKEN=my-secret-token ./nv-monitor -p 9101  # token via env var (preferred)
+```
+
+The env var is preferred over `-t` since CLI arguments are visible in `ps` output. Without `-t` or `NV_MONITOR_TOKEN`, no auth is required (backwards compatible).
+
+**Design rationale:** nv-monitor is a lightweight, single-purpose endpoint — it intentionally does not implement TLS. For transport security, layer it with the tools you already have:
+
+- **Tailscale** — zero-config encrypted mesh, just run nv-monitor on the tailnet
+- **SSH tunnel** — `ssh -L 9101:localhost:9101 dgx-spark`
+- **Reverse proxy** — nginx/caddy with TLS termination
+- **Service mesh** — Istio, Linkerd, etc.
+
+This keeps the binary small, dependency-free, and composable with existing infrastructure.
 
 ## Synthetic Load Testing
 
