@@ -160,13 +160,18 @@ typedef void *CUmodule;
 typedef void *CUfunction;
 typedef void *CUstream;
 
+typedef struct {
+    int gpu_index;
+} GpuThreadArg;
+
 static void *gpu_load_thread(void *arg) {
-    (void)arg;
+    GpuThreadArg *ga = (GpuThreadArg *)arg;
+    int gpu_idx = ga->gpu_index;
+    free(ga);
 
     void *cuda = dlopen("libcuda.so.1", RTLD_LAZY);
     if (!cuda) {
         fprintf(stderr, "demo-load: cannot open libcuda.so.1: %s\n", dlerror());
-        fprintf(stderr, "           GPU load disabled, run without --gpu\n");
         return NULL;
     }
 
@@ -184,7 +189,6 @@ static void *gpu_load_thread(void *arg) {
     CUresult (*cuStreamCreate)(CUstream *, unsigned) = dlsym(cuda, "cuStreamCreate");
     CUresult (*cuStreamSynchronize)(CUstream) = dlsym(cuda, "cuStreamSynchronize");
     CUresult (*cuStreamDestroy)(CUstream) = dlsym(cuda, "cuStreamDestroy_v2");
-
     if (!cuInit || !cuDeviceGet || !cuCtxCreate || !cuModuleLoadData ||
         !cuModuleGetFunction || !cuLaunchKernel || !cuCtxSynchronize || !cuCtxDestroy ||
         !cuStreamCreate || !cuStreamSynchronize || !cuStreamDestroy) {
@@ -201,18 +205,18 @@ static void *gpu_load_thread(void *arg) {
     }
 
     int dev = 0;
-    cuDeviceGet(&dev, 0);
+    cuDeviceGet(&dev, gpu_idx);
 
     CUcontext ctx = NULL;
     if ((rc = cuCtxCreate(&ctx, 0, dev)) != 0) {
-        fprintf(stderr, "demo-load: cuCtxCreate failed (%d)\n", rc);
+        fprintf(stderr, "demo-load: cuCtxCreate failed for GPU %d (%d)\n", gpu_idx, rc);
         dlclose(cuda);
         return NULL;
     }
 
     CUmodule mod = NULL;
     if ((rc = cuModuleLoadData(&mod, ptx_source)) != 0) {
-        fprintf(stderr, "demo-load: cuModuleLoadData failed (%d) — GPU may not support sm_50\n", rc);
+        fprintf(stderr, "demo-load: cuModuleLoadData failed for GPU %d (%d)\n", gpu_idx, rc);
         cuCtxDestroy(ctx);
         dlclose(cuda);
         return NULL;
@@ -227,7 +231,7 @@ static void *gpu_load_thread(void *arg) {
     /* ── Calibrate: measure how long one kernel takes ── */
     unsigned int blocks = gpu_blocks;
 
-    printf("Calibrating GPU load...");
+    printf("GPU %d: calibrating...", gpu_idx);
     fflush(stdout);
 
     /* Warm up */
@@ -253,7 +257,7 @@ static void *gpu_load_thread(void *arg) {
     struct timespec ts_start;
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
-    printf("GPU load active (Ctrl-C to stop)\n");
+    printf("GPU %d: load active\n", gpu_idx);
 
     /*
      * Duty-cycle in 500ms windows (NVML samples at ~1s).
@@ -370,8 +374,9 @@ int main(int argc, char **argv) {
     if (ncpus < 1) ncpus = 1;
 
     pthread_t *cpu_threads = NULL;
-    pthread_t gpu_thread;
-    int gpu_started = 0;
+    #define MAX_GPUS 16
+    pthread_t gpu_threads[MAX_GPUS];
+    int n_gpus = 0;
 
     if (do_cpu) {
         printf("Starting CPU load on %d cores (sinusoidal, phased)\n", ncpus);
@@ -385,9 +390,31 @@ int main(int argc, char **argv) {
     }
 
     if (do_gpu) {
-        printf("Starting GPU load (sinusoidal)\n");
-        pthread_create(&gpu_thread, NULL, gpu_load_thread, NULL);
-        gpu_started = 1;
+        /* Detect GPU count via CUDA driver API */
+        void *cuda = dlopen("libcuda.so.1", RTLD_LAZY);
+        if (cuda) {
+            CUresult (*cuInit)(unsigned) = dlsym(cuda, "cuInit");
+            CUresult (*cuDeviceGetCount)(int *) = dlsym(cuda, "cuDeviceGetCount");
+            if (cuInit && cuDeviceGetCount && cuInit(0) == 0) {
+                int count = 0;
+                cuDeviceGetCount(&count);
+                if (count > MAX_GPUS) count = MAX_GPUS;
+                n_gpus = count;
+            }
+            dlclose(cuda);
+        }
+
+        if (n_gpus == 0) {
+            fprintf(stderr, "demo-load: no GPUs found\n");
+        } else {
+            printf("Starting GPU load on %d GPU%s (sinusoidal)\n",
+                   n_gpus, n_gpus > 1 ? "s" : "");
+            for (int g = 0; g < n_gpus; g++) {
+                GpuThreadArg *ga = malloc(sizeof(GpuThreadArg));
+                ga->gpu_index = g;
+                pthread_create(&gpu_threads[g], NULL, gpu_load_thread, ga);
+            }
+        }
     }
 
     if (stop_at > 0) {
@@ -415,8 +442,8 @@ int main(int argc, char **argv) {
             pthread_join(cpu_threads[i], NULL);
         free(cpu_threads);
     }
-    if (gpu_started)
-        pthread_join(gpu_thread, NULL);
+    for (int g = 0; g < n_gpus; g++)
+        pthread_join(gpu_threads[g], NULL);
 
     printf("Done.\n");
     return 0;

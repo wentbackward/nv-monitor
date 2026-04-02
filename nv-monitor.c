@@ -78,6 +78,7 @@ static nvmlReturn_t (*pNvmlDeviceGetDecoderUtilization)(nvmlDevice_t, unsigned i
 
 static void *nvml_handle = NULL;
 static int   nvml_ok = 0;
+static unsigned int gpu_count = 0;      /* number of GPUs detected */
 static char  cpu_model_name[128] = "";  /* from /proc/cpuinfo */
 
 /* ── Constants ──────────────────────────────────────────────────────── */
@@ -196,7 +197,7 @@ static int    history_count = 0;
 static volatile sig_atomic_t g_quit = 0;
 static int sort_mode = 0; /* 0=by mem, 1=by pid */
 static int delay_ms = REFRESH_MS;
-static double last_gpu_util = 0; /* captured during draw for history */
+static double last_gpu_util = 0; /* average GPU util captured during draw for history */
 
 /* Command-line options */
 static FILE *log_fp = NULL;
@@ -763,7 +764,8 @@ static void log_csv_header(FILE *f) {
     fprintf(f, ",cpu_temp_c,cpu_freq_mhz");
     fprintf(f, ",mem_used_kb,mem_total_kb,mem_bufcache_kb");
     fprintf(f, ",swap_used_kb,swap_total_kb");
-    fprintf(f, ",gpu_util_pct,gpu_temp_c,gpu_power_mw,gpu_clock_mhz");
+    for (unsigned int g = 0; g < gpu_count; g++)
+        fprintf(f, ",gpu%u_util_pct,gpu%u_temp_c,gpu%u_power_mw,gpu%u_clock_mhz", g, g, g, g);
     for (int i = 0; i < rdma_count; i++)
         fprintf(f, ",rdma_%s_p%d_xmit_Bps,rdma_%s_p%d_recv_Bps",
                 rdma_ports[i].device, rdma_ports[i].port,
@@ -796,9 +798,9 @@ static void log_csv_row(FILE *f) {
     fprintf(f, ",%llu,%llu", mi.swap_used_kb, mi.swap_total_kb);
 
     /* GPU */
-    if (nvml_ok) {
+    for (unsigned int g = 0; g < gpu_count; g++) {
         nvmlDevice_t dev;
-        if (pNvmlDeviceGetHandleByIndex(0, &dev) == NVML_SUCCESS) {
+        if (pNvmlDeviceGetHandleByIndex(g, &dev) == NVML_SUCCESS) {
             nvmlUtilization_t util = {0};
             pNvmlDeviceGetUtilizationRates(dev, &util);
 
@@ -817,9 +819,8 @@ static void log_csv_row(FILE *f) {
         } else {
             fprintf(f, ",,,,");
         }
-    } else {
-        fprintf(f, ",,,,");
     }
+    if (gpu_count == 0) fprintf(f, ",,,,");
 
     for (int i = 0; i < rdma_count; i++)
         fprintf(f, ",%.0f,%.0f", rdma_ports[i].xmit_bytes_sec, rdma_ports[i].recv_bytes_sec);
@@ -1511,10 +1512,10 @@ static void draw_screen(void) {
         attroff(COLOR_PAIR(1));
         y += 2;
     } else {
-        unsigned int dev_count = 0;
-        pNvmlDeviceGetCount(&dev_count);
+        double gpu_util_sum = 0;
+        unsigned int gpu_util_n = 0;
 
-        for (unsigned int d = 0; d < dev_count && y < rows - 4; d++) {
+        for (unsigned int d = 0; d < gpu_count && y < rows - 4; d++) {
             nvmlDevice_t dev;
             if (pNvmlDeviceGetHandleByIndex(d, &dev) != NVML_SUCCESS) continue;
 
@@ -1523,7 +1524,8 @@ static void draw_screen(void) {
 
             nvmlUtilization_t util = {0};
             pNvmlDeviceGetUtilizationRates(dev, &util);
-            last_gpu_util = (double)util.gpu;
+            gpu_util_sum += (double)util.gpu;
+            gpu_util_n++;
 
             unsigned int temp = 0;
             pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
@@ -1709,6 +1711,8 @@ static void draw_screen(void) {
                 y++;
             }
         }
+
+        last_gpu_util = gpu_util_n > 0 ? gpu_util_sum / gpu_util_n : 0;
     }
 
     /* ── History chart (full width) ───────────────────────────────── */
@@ -1754,7 +1758,7 @@ static void draw_screen(void) {
 
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
-    setlocale(LC_NUMERIC, "C");  /* Force decimal point for Prometheus exposition format */
+    setlocale(LC_NUMERIC, "C"); /* Force decimal point for Prometheus exposition format */
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
 
@@ -1791,6 +1795,8 @@ int main(int argc, char *argv[]) {
 
     /* Load NVML */
     nvml_ok = (load_nvml() == 0);
+    if (nvml_ok && pNvmlDeviceGetCount)
+        pNvmlDeviceGetCount(&gpu_count);
 
     /* Read CPU info */
     read_cpu_model_name();
