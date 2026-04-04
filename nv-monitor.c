@@ -54,6 +54,7 @@ typedef struct {
 } nvmlProcessInfo_t;
 
 #define NVML_SUCCESS 0
+#define NVML_ERROR_NOT_SUPPORTED 3
 #define NVML_TEMPERATURE_GPU 0
 #define NVML_CLOCK_GRAPHICS 0
 #define NVML_CLOCK_MEM 2
@@ -79,6 +80,7 @@ static nvmlReturn_t (*pNvmlDeviceGetDecoderUtilization)(nvmlDevice_t, unsigned i
 static void *nvml_handle = NULL;
 static int   nvml_ok = 0;
 static unsigned int gpu_count = 0;      /* number of GPUs detected */
+static int   use_tegra_gpu = 0;         /* prefer Tegra sysfs over NVML for GPU metrics */
 static char  cpu_model_name[128] = "";  /* from /proc/cpuinfo */
 
 /* ── Constants ──────────────────────────────────────────────────────── */
@@ -324,13 +326,21 @@ static void read_cpu_part_ids(void) {
 
 static const char *cpu_part_label(int cpu_idx) {
     switch (cpu_part[cpu_idx]) {
+    /* Grace (DGX Spark / DGX 300) */
     case 0xd85: return "X925";
     case 0xd87: return "X725";
+    /* Jetson Orin (Nano / NX / AGX) */
+    case 0xd42: return "A78A";  /* Cortex-A78AE */
+    /* Other common ARM cores */
     case 0xd44: return "X4";
     case 0xd43: return "A720";
     case 0xd46: return "A725";
     case 0xd41: return "A78";
     case 0xd40: return "V2";
+    case 0xd0b: return "A76";
+    case 0xd0a: return "A75";
+    case 0xd07: return "A57";   /* Jetson TX1/TX2 */
+    case 0xd03: return "A53";   /* Jetson Nano (original) */
     default:    return "";
     }
 }
@@ -482,6 +492,70 @@ static int read_cpu_freq_mhz(void) {
     (void)!fscanf(f, "%d", &khz);
     fclose(f);
     return khz / 1000;
+}
+
+/* ── Tegra GPU sysfs fallback (Jetson Orin / Nano / NX / AGX) ──────── */
+
+static int tegra_gpu_available = 0;
+static char tegra_gpu_load_path[256] = "";
+static int tegra_gpu_therm_zone = -1; /* thermal zone index for GPU-therm */
+
+static void detect_tegra_gpu(void) {
+    /* Try known Tegra GPU load paths */
+    const char *gpu_paths[] = {
+        "/sys/devices/gpu.0/load",
+        "/sys/devices/platform/bus@0/17000000.gpu/load",
+        "/sys/devices/platform/17000000.gpu/load",
+        NULL
+    };
+    for (int i = 0; gpu_paths[i]; i++) {
+        FILE *f = fopen(gpu_paths[i], "r");
+        if (f) {
+            tegra_gpu_available = 1;
+            snprintf(tegra_gpu_load_path, sizeof(tegra_gpu_load_path), "%s", gpu_paths[i]);
+            fclose(f);
+            break;
+        }
+    }
+
+    /* Find GPU thermal zone */
+    for (int i = 0; i < 20; i++) {
+        char path[128], type[64] = "";
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/type", i);
+        FILE *f = fopen(path, "r");
+        if (!f) break;
+        if (fgets(type, sizeof(type), f)) {
+            type[strcspn(type, "\n\r")] = '\0';
+            if (strcasecmp(type, "GPU-therm") == 0 ||
+                strcasecmp(type, "gpu-thermal") == 0) {
+                tegra_gpu_therm_zone = i;
+                fclose(f);
+                break;
+            }
+        }
+        fclose(f);
+    }
+}
+
+static int read_tegra_gpu_util(void) {
+    FILE *f = fopen(tegra_gpu_load_path, "r");
+    if (!f) return -1;
+    int load = 0;
+    (void)!fscanf(f, "%d", &load);
+    fclose(f);
+    return load / 10; /* scale is 0-1000 -> 0-100% */
+}
+
+static int read_tegra_gpu_temp(void) {
+    if (tegra_gpu_therm_zone < 0) return -1;
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", tegra_gpu_therm_zone);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int t = 0;
+    (void)!fscanf(f, "%d", &t);
+    fclose(f);
+    return t / 1000;
 }
 
 /* ── Process name lookup ────────────────────────────────────────────── */
@@ -803,10 +877,20 @@ static void log_csv_row(FILE *f) {
         nvmlDevice_t dev;
         if (pNvmlDeviceGetHandleByIndex(g, &dev) == NVML_SUCCESS) {
             nvmlUtilization_t util = {0};
-            pNvmlDeviceGetUtilizationRates(dev, &util);
+            if (!use_tegra_gpu && pNvmlDeviceGetUtilizationRates)
+                pNvmlDeviceGetUtilizationRates(dev, &util);
+            if (use_tegra_gpu) {
+                int tutil = read_tegra_gpu_util();
+                if (tutil >= 0) util.gpu = (unsigned int)tutil;
+            }
 
             unsigned int temp = 0;
-            pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
+            if (!use_tegra_gpu && pNvmlDeviceGetTemperature)
+                pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
+            if (use_tegra_gpu && tegra_gpu_therm_zone >= 0) {
+                int ttemp = read_tegra_gpu_temp();
+                if (ttemp > 0) temp = (unsigned int)ttemp;
+            }
 
             unsigned int power_mw = 0;
             if (pNvmlDeviceGetPowerUsage)
@@ -1066,10 +1150,20 @@ static int format_metrics(char *buf, int buflen) {
             pNvmlDeviceGetName(dev, g->name, sizeof(g->name));
 
             nvmlUtilization_t util = {0};
-            pNvmlDeviceGetUtilizationRates(dev, &util);
+            if (!use_tegra_gpu && pNvmlDeviceGetUtilizationRates)
+                pNvmlDeviceGetUtilizationRates(dev, &util);
+            if (use_tegra_gpu) {
+                int tutil = read_tegra_gpu_util();
+                if (tutil >= 0) util.gpu = (unsigned int)tutil;
+            }
             g->util_gpu = util.gpu;
 
-            pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &g->temp);
+            if (!use_tegra_gpu && pNvmlDeviceGetTemperature)
+                pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &g->temp);
+            if (use_tegra_gpu && tegra_gpu_therm_zone >= 0) {
+                int ttemp = read_tegra_gpu_temp();
+                if (ttemp > 0) g->temp = (unsigned int)ttemp;
+            }
 
             g->has_power = (pNvmlDeviceGetPowerUsage &&
                             pNvmlDeviceGetPowerUsage(dev, &g->power_mw) == NVML_SUCCESS);
@@ -1540,12 +1634,22 @@ static void draw_screen(void) {
             pNvmlDeviceGetName(dev, name, sizeof(name));
 
             nvmlUtilization_t util = {0};
-            pNvmlDeviceGetUtilizationRates(dev, &util);
+            if (!use_tegra_gpu && pNvmlDeviceGetUtilizationRates)
+                pNvmlDeviceGetUtilizationRates(dev, &util);
+            if (use_tegra_gpu) {
+                int tutil = read_tegra_gpu_util();
+                if (tutil >= 0) util.gpu = (unsigned int)tutil;
+            }
             gpu_util_sum += (double)util.gpu;
             gpu_util_n++;
 
             unsigned int temp = 0;
-            pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
+            if (!use_tegra_gpu && pNvmlDeviceGetTemperature)
+                pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
+            if (use_tegra_gpu && tegra_gpu_therm_zone >= 0) {
+                int ttemp = read_tegra_gpu_temp();
+                if (ttemp > 0) temp = (unsigned int)ttemp;
+            }
 
             unsigned int power_mw = 0;
             int has_power = (pNvmlDeviceGetPowerUsage && pNvmlDeviceGetPowerUsage(dev, &power_mw) == NVML_SUCCESS);
@@ -1629,17 +1733,23 @@ static void draw_screen(void) {
             GpuProc all_procs[MAX_GPU_PROCS * 2];
             int n_all = 0;
 
-            if (pNvmlDeviceGetComputeRunningProcesses)
-                pNvmlDeviceGetComputeRunningProcesses(dev, &n_comp, comp_procs);
-            else
+            if (pNvmlDeviceGetComputeRunningProcesses) {
+                int rc = pNvmlDeviceGetComputeRunningProcesses(dev, &n_comp, comp_procs);
+                if (rc != NVML_SUCCESS) n_comp = 0;
+            } else {
                 n_comp = 0;
+            }
 
-            if (pNvmlDeviceGetGraphicsRunningProcesses)
-                pNvmlDeviceGetGraphicsRunningProcesses(dev, &n_gfx, gfx_procs);
-            else
+            if (pNvmlDeviceGetGraphicsRunningProcesses) {
+                int rc = pNvmlDeviceGetGraphicsRunningProcesses(dev, &n_gfx, gfx_procs);
+                if (rc != NVML_SUCCESS) n_gfx = 0;
+            } else {
                 n_gfx = 0;
+            }
 
             for (unsigned int i = 0; i < n_comp && n_all < MAX_GPU_PROCS * 2; i++) {
+                /* Validate PID — Jetson NVML can return garbage */
+                if (comp_procs[i].pid == 0 || comp_procs[i].pid > 4194304) continue;
                 GpuProc *p = &all_procs[n_all++];
                 p->pid = comp_procs[i].pid;
                 unsigned long long mem = comp_procs[i].usedGpuMemory;
@@ -1650,6 +1760,7 @@ static void draw_screen(void) {
                 get_proc_user(p->pid, p->user, sizeof(p->user));
             }
             for (unsigned int i = 0; i < n_gfx && n_all < MAX_GPU_PROCS * 2; i++) {
+                if (gfx_procs[i].pid == 0 || gfx_procs[i].pid > 4194304) continue;
                 /* Skip duplicates */
                 int dup = 0;
                 for (int j = 0; j < n_all; j++)
@@ -1823,6 +1934,12 @@ int main(int argc, char *argv[]) {
     /* Read CPU info */
     read_cpu_model_name();
     read_cpu_part_ids();
+
+    /* Detect Tegra GPU sysfs (Jetson fallback) */
+    detect_tegra_gpu();
+    /* On Tegra/Jetson, NVML returns SUCCESS but zeros for util/temp — prefer sysfs */
+    if (tegra_gpu_available)
+        use_tegra_gpu = 1;
 
     /* Initial CPU tick read */
     read_cpu_ticks(prev_ticks, &num_cpus);

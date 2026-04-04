@@ -67,7 +67,9 @@ Loads a small PTX kernel (FMA-heavy compute loop) via the CUDA driver API at run
 2. During the busy portion, kernels are queued back-to-back on a CUDA stream with no synchronisation between launches — keeping the GPU pipeline fully saturated
 3. A single sync at the end, then sleep for the idle portion
 
-This matches how NVML measures utilisation (fraction of time the GPU was active), producing smooth, realistic-looking load curves.
+This matches how NVML measures utilisation (fraction of time the GPU was active), producing smooth, realistic-looking load curves on larger GPUs.
+
+**Note:** On smaller GPUs (e.g. Jetson Orin Nano) the kernel executes very fast (~0.03ms), so the duty cycle appears more binary (on/off) rather than smoothly sinusoidal at NVML's ~1s sampling rate. This is expected — the load is still varying over time, just with sharper transitions. On larger GPUs (DGX Spark, RTX, A100) the curves are smoother.
 
 ## Example: Multi-Node Production Test
 
