@@ -197,6 +197,7 @@ make demo-load
 | DGX Spark (aarch64, Grace + GB10) | Primary target — full support including unified memory, HugePages, big.LITTLE core labels |
 | Any Linux + NVIDIA GPU (x86_64) | Fully supported — CPU, memory, GPU, processes, Prometheus exporter |
 | Linux without NVIDIA GPU | CPU and memory monitoring only, GPU section shows "NVML not available" |
+| RDMA / InfiniBand | Community-verified on real hardware — auto-detected via `/sys/class/infiniband/`, feedback welcome |
 
 ## Contributors
 
