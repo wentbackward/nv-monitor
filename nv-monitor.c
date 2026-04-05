@@ -24,6 +24,7 @@
 #include <ncurses.h>
 #include <locale.h>
 #include <sys/sysinfo.h>
+#include <sys/stat.h>
 #include <getopt.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -494,6 +495,11 @@ static int read_cpu_freq_mhz(void) {
     return khz / 1000;
 }
 
+/* Forward declarations for process lookup (used by Tegra GPU scanner) */
+static void get_proc_cmdline(unsigned int pid, char *buf, int len);
+static void get_proc_user(unsigned int pid, char *buf, int len);
+static double calc_proc_cpu_pct(unsigned int pid);
+
 /* ── Tegra GPU sysfs fallback (Jetson Orin / Nano / NX / AGX) ──────── */
 
 static int tegra_gpu_available = 0;
@@ -556,6 +562,98 @@ static int read_tegra_gpu_temp(void) {
     (void)!fscanf(f, "%d", &t);
     fclose(f);
     return t / 1000;
+}
+
+/* Scan /proc for processes with open fds to GPU device nodes.
+ * Used on Jetson where NVML process listing returns garbage. */
+static dev_t tegra_gpu_dev = 0; /* device ID of /dev/nvhost-gpu or /dev/dri/card0 */
+
+static void detect_tegra_gpu_dev(void) {
+    const char *dev_paths[] = {
+        "/dev/nvhost-gpu",
+        "/dev/dri/card0",
+        "/dev/dri/renderD128",
+        NULL
+    };
+    struct stat st;
+    for (int i = 0; dev_paths[i]; i++) {
+        if (stat(dev_paths[i], &st) == 0 && S_ISCHR(st.st_mode)) {
+            tegra_gpu_dev = st.st_rdev;
+            break;
+        }
+    }
+}
+
+static int scan_tegra_gpu_procs(GpuProc *procs, int max_procs) {
+    if (!tegra_gpu_dev && !use_tegra_gpu) return 0;
+    int n = 0;
+    pid_t my_pid = getpid();
+
+    DIR *proc_dir = opendir("/proc");
+    if (!proc_dir) return 0;
+
+    struct dirent *pent;
+    while ((pent = readdir(proc_dir)) && n < max_procs) {
+        /* Skip non-numeric entries */
+        unsigned int pid = 0;
+        if (sscanf(pent->d_name, "%u", &pid) != 1 || pid == 0) continue;
+        if ((pid_t)pid == my_pid) continue; /* skip ourselves */
+
+        /* Check if this PID already found */
+        int dup = 0;
+        for (int i = 0; i < n; i++)
+            if (procs[i].pid == pid) { dup = 1; break; }
+        if (dup) continue;
+
+        char fd_dir[64];
+        snprintf(fd_dir, sizeof(fd_dir), "/proc/%u/fd", pid);
+        DIR *fds = opendir(fd_dir);
+        if (!fds) continue;
+
+        int found = 0;
+        struct dirent *fent;
+        while ((fent = readdir(fds))) {
+            char fd_path[128], link_target[256];
+            snprintf(fd_path, sizeof(fd_path), "/proc/%u/fd/%s", pid, fent->d_name);
+
+            /* Check 1: device file matches GPU device ID */
+            struct stat fd_stat;
+            if (tegra_gpu_dev && stat(fd_path, &fd_stat) == 0 &&
+                S_ISCHR(fd_stat.st_mode) &&
+                fd_stat.st_rdev == tegra_gpu_dev) {
+                found = 1;
+                break;
+            }
+
+            /* Check 2: symlink target contains nvhost GPU or DRI render node */
+            int llen = readlink(fd_path, link_target, sizeof(link_target) - 1);
+            if (llen > 0) {
+                link_target[llen] = '\0';
+                if (strstr(link_target, "nvhost") && strstr(link_target, "gpu")) {
+                    found = 1;
+                    break;
+                }
+                if (strstr(link_target, "/dev/dri/render")) {
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        closedir(fds);
+
+        if (found) {
+            GpuProc *p = &procs[n];
+            p->pid = pid;
+            p->mem_bytes = 0; /* not available via fd scan */
+            p->type = 'C';
+            p->cpu_pct = calc_proc_cpu_pct(pid);
+            get_proc_cmdline(pid, p->name, sizeof(p->name));
+            get_proc_user(pid, p->user, sizeof(p->user));
+            n++;
+        }
+    }
+    closedir(proc_dir);
+    return n;
 }
 
 /* ── Process name lookup ────────────────────────────────────────────── */
@@ -1776,6 +1874,10 @@ static void draw_screen(void) {
                 get_proc_user(p->pid, p->user, sizeof(p->user));
             }
 
+            /* Tegra fallback: scan /proc for GPU device fd holders */
+            if (n_all == 0 && use_tegra_gpu)
+                n_all = scan_tegra_gpu_procs(all_procs, MAX_GPU_PROCS * 2);
+
             /* Save snapshots for next frame's delta calculation */
             update_proc_cpu_snapshots(all_procs, n_all);
 
@@ -1937,6 +2039,7 @@ int main(int argc, char *argv[]) {
 
     /* Detect Tegra GPU sysfs (Jetson fallback) */
     detect_tegra_gpu();
+    detect_tegra_gpu_dev();
     /* On Tegra/Jetson, NVML returns SUCCESS but zeros for util/temp — prefer sysfs */
     if (tegra_gpu_available)
         use_tegra_gpu = 1;
@@ -1999,6 +2102,8 @@ int main(int argc, char *argv[]) {
         while (!g_quit) {
             compute_cpu_usage();
             read_rdma_ports();
+            /* Force full repaint to recover from terminal corruption */
+            clearok(stdscr, TRUE);
             draw_screen();
 
             /* Log at log_interval_ms if logging enabled */
