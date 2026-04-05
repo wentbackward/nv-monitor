@@ -52,6 +52,12 @@ Accurately monitor a single machine or an entire cluster with minimal overhead. 
 <td><img src="nv-monitor-arm.png" alt="nv-monitor on ARM"></td>
 <td><img src="nv-monitor-x86.png" alt="nv-monitor on x86"></td>
 </tr>
+<tr>
+<td><strong>arm64</strong> (Jetson Orin Nano)</td>
+</tr>
+<tr>
+<td><img src="nv-monitor-jetson.png" alt="nv-monitor on Jetson"></td>
+</tr>
 </table>
 
 ## Download
