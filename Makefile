@@ -6,7 +6,7 @@ LDFLAGS  = -lncursesw -ldl -lpthread
 PREFIX   ?= /usr/local
 TARGET   = nv-monitor
 
-all: $(TARGET)
+all: $(TARGET) demo-load
 
 $(TARGET): nv-monitor.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
