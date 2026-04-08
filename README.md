@@ -200,6 +200,13 @@ make demo-load
 | Any Linux + NVIDIA GPU (x86_64) | Fully supported — CPU, memory, GPU, processes, Prometheus exporter |
 | Linux without NVIDIA GPU | CPU and memory monitoring only, GPU section shows "NVML not available" |
 | RDMA / InfiniBand | Community-verified on real hardware — auto-detected via `/sys/class/infiniband/`, feedback welcome |
+| Jetson Orin (Nano / NX / AGX) | GPU via Tegra sysfs, A78AE core labels, legacy glibc binary available |
+
+### A note on RDMA and cross-node bandwidth
+
+nv-monitor captures per-port TX/RX throughput over QSFP/InfiniBand links — this is cross-node traffic by definition. In a Prometheus/Grafana setup you can visualise each node's fabric utilisation side by side and infer traffic flows.
+
+For fabric-level visibility (topology, per-peer bandwidth, congestion maps, hop-by-hop latency), use your subnet manager or NVIDIA UFM alongside nv-monitor. Networking is a complex domain — nv-monitor focuses on endpoint metrics and leaves fabric management to dedicated tools.
 
 ## Contributors
 
