@@ -86,23 +86,24 @@ static char  cpu_model_name[128] = "";  /* from /proc/cpuinfo */
 
 /* ── Constants ──────────────────────────────────────────────────────── */
 
-#define MAX_CPUS      128
-#define MAX_GPU_PROCS 64
+#define MAX_GPU_PROCS 256
 #define REFRESH_MS    1000
 #define BAR_CHAR_FULL  ACS_BLOCK
 #define COLOR_GRAY     8
 #define HISTORY_LEN   20
 
-/* ── CPU state ──────────────────────────────────────────────────────── */
+/* ── CPU state (dynamically allocated at startup) ──────────────────── */
 
 typedef struct {
     unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
 } CpuTick;
 
 static int       num_cpus = 0;
-static CpuTick   prev_ticks[MAX_CPUS + 1]; /* index 0 = aggregate */
-static double     cpu_pct[MAX_CPUS + 1];
-static unsigned int cpu_part[MAX_CPUS];     /* ARM CPU part IDs */
+static int       max_cpus = 0;       /* allocated size */
+static CpuTick  *prev_ticks = NULL;  /* [max_cpus + 1] — index 0 = aggregate */
+static CpuTick  *cur_ticks = NULL;   /* [max_cpus + 1] — current frame */
+static double   *cpu_pct = NULL;     /* [max_cpus + 1] */
+static unsigned int *cpu_part = NULL; /* [max_cpus] */
 
 /* ── GPU process info ───────────────────────────────────────────────── */
 
@@ -117,7 +118,7 @@ typedef struct {
 
 /* ── Per-process CPU tracking ───────────────────────────────────────── */
 
-#define MAX_TRACKED_PIDS 128
+#define MAX_TRACKED_PIDS 512
 
 typedef struct {
     unsigned int  pid;
@@ -316,7 +317,7 @@ static void read_cpu_part_ids(void) {
         int n;
         if (sscanf(line, "processor : %d", &n) == 1) {
             cur_cpu = n;
-        } else if (cur_cpu >= 0 && cur_cpu < MAX_CPUS) {
+        } else if (cur_cpu >= 0 && cur_cpu < max_cpus) {
             unsigned int part;
             if (sscanf(line, "CPU part : %x", &part) == 1)
                 cpu_part[cur_cpu] = part;
@@ -369,9 +370,10 @@ static void read_cpu_ticks(CpuTick ticks[], int *n_cpus) {
             sscanf(strchr(line + 3, ' ') + 1, "%llu %llu %llu %llu %llu %llu %llu %llu",
                    &t.user, &t.nice, &t.system, &t.idle,
                    &t.iowait, &t.irq, &t.softirq, &t.steal);
-            if (cpunum + 1 < MAX_CPUS)
+            if (cpunum + 1 < max_cpus) {
                 ticks[cpunum + 1] = t;
-            idx = cpunum + 1;
+                idx = cpunum + 1;
+            }
         }
     }
     *n_cpus = idx;
@@ -379,22 +381,23 @@ static void read_cpu_ticks(CpuTick ticks[], int *n_cpus) {
 }
 
 static void compute_cpu_usage(void) {
-    CpuTick cur[MAX_CPUS + 1];
+    memset(cur_ticks, 0, (max_cpus + 1) * sizeof(CpuTick));
     int n = 0;
-    read_cpu_ticks(cur, &n);
+    read_cpu_ticks(cur_ticks, &n);
+    if (n > max_cpus) n = max_cpus;
     num_cpus = n;
 
     for (int i = 0; i <= n; i++) {
         unsigned long long prev_idle  = prev_ticks[i].idle + prev_ticks[i].iowait;
-        unsigned long long cur_idle   = cur[i].idle + cur[i].iowait;
+        unsigned long long cur_idle   = cur_ticks[i].idle + cur_ticks[i].iowait;
         unsigned long long prev_total = prev_ticks[i].user + prev_ticks[i].nice +
                                         prev_ticks[i].system + prev_ticks[i].idle +
                                         prev_ticks[i].iowait + prev_ticks[i].irq +
                                         prev_ticks[i].softirq + prev_ticks[i].steal;
-        unsigned long long cur_total  = cur[i].user + cur[i].nice +
-                                        cur[i].system + cur[i].idle +
-                                        cur[i].iowait + cur[i].irq +
-                                        cur[i].softirq + cur[i].steal;
+        unsigned long long cur_total  = cur_ticks[i].user + cur_ticks[i].nice +
+                                        cur_ticks[i].system + cur_ticks[i].idle +
+                                        cur_ticks[i].iowait + cur_ticks[i].irq +
+                                        cur_ticks[i].softirq + cur_ticks[i].steal;
         unsigned long long totald = cur_total - prev_total;
         unsigned long long idled  = cur_idle - prev_idle;
         if (totald == 0)
@@ -403,7 +406,7 @@ static void compute_cpu_usage(void) {
             cpu_pct[i] = (double)(totald - idled) / (double)totald * 100.0;
     }
 
-    memcpy(prev_ticks, cur, sizeof(cur));
+    memcpy(prev_ticks, cur_ticks, (max_cpus + 1) * sizeof(CpuTick));
 }
 
 /* ── Memory info ────────────────────────────────────────────────────── */
@@ -1130,8 +1133,8 @@ static void read_rdma_ports(void) {
 static int   prom_sock = -1;
 static pthread_t prom_thread;
 
-#define PROM_BUF_SIZE 16384
-#define PROM_MAX_GPUS 8
+#define PROM_BYTES_PER_GPU 512  /* estimated Prometheus output per GPU */
+#define PROM_BASE_SIZE 8192     /* base buffer for CPU/memory/system metrics */
 
 typedef struct {
     int      valid;
@@ -1148,6 +1151,10 @@ typedef struct {
     unsigned int enc, dec;
     int      has_enc, has_dec;
 } PromGpu;
+
+static int      prom_buf_size = 0;
+static char    *prom_body = NULL;
+static PromGpu *prom_gpus = NULL;
 
 /* Format all metrics into buf. Returns bytes written. */
 static int format_metrics(char *buf, int buflen) {
@@ -1232,14 +1239,16 @@ static int format_metrics(char *buf, int buflen) {
     }
 
     /* GPU — collect data first, then format grouped by metric family */
-    PromGpu gpus[PROM_MAX_GPUS];
+    PromGpu *gpus = prom_gpus;
     int n_gpus = 0;
+    if (gpus && gpu_count > 0)
+        memset(gpus, 0, gpu_count * sizeof(PromGpu));
 
     if (nvml_ok) {
         unsigned int dev_count = 0;
         pNvmlDeviceGetCount(&dev_count);
 
-        for (unsigned int d = 0; d < dev_count && (int)d < PROM_MAX_GPUS; d++) {
+        for (unsigned int d = 0; d < dev_count && d < gpu_count; d++) {
             PromGpu *g = &gpus[n_gpus];
             memset(g, 0, sizeof(*g));
             nvmlDevice_t dev;
@@ -1435,8 +1444,8 @@ static void prom_handle(int fd) {
     }
 
     if (strstr(req, "GET /metrics")) {
-        char body[PROM_BUF_SIZE];
-        int bodylen = format_metrics(body, sizeof(body));
+        if (!prom_body) return;
+        int bodylen = format_metrics(prom_body, prom_buf_size);
 
         char hdr[128];
         int hlen = snprintf(hdr, sizeof(hdr),
@@ -1446,7 +1455,7 @@ static void prom_handle(int fd) {
             "Connection: close\r\n\r\n", bodylen);
 
         send(fd, hdr, hlen, MSG_NOSIGNAL);
-        send(fd, body, bodylen, MSG_NOSIGNAL);
+        send(fd, prom_body, bodylen, MSG_NOSIGNAL);
     } else {
         /* Landing page with link to /metrics */
         static const char resp[] =
@@ -1463,6 +1472,12 @@ static void prom_handle(int fd) {
 /* Server thread — blocks on poll() with 1s timeout for clean shutdown */
 static void *prom_server(void *arg) {
     (void)arg;
+    /* Pre-allocate buffers once for the lifetime of the thread */
+    prom_buf_size = PROM_BASE_SIZE + (gpu_count * PROM_BYTES_PER_GPU) +
+                    (num_cpus * 80);
+    prom_body = malloc(prom_buf_size);
+    prom_gpus = calloc(gpu_count > 0 ? gpu_count : 1, sizeof(PromGpu));
+
     while (!g_quit) {
         struct pollfd pfd = { .fd = prom_sock, .events = POLLIN };
         if (poll(&pfd, 1, 1000) <= 0) continue;
@@ -1472,6 +1487,8 @@ static void *prom_server(void *arg) {
         prom_handle(fd);
         close(fd);
     }
+    free(prom_body);  prom_body = NULL;
+    free(prom_gpus);  prom_gpus = NULL;
     return NULL;
 }
 
@@ -1509,7 +1526,7 @@ static int prom_start(void) {
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 131072); /* 128 KB — minimal for aarch64 */
+    pthread_attr_setstacksize(&attr, 524288); /* 512 KB — room for large GPU arrays */
 
     if (pthread_create(&prom_thread, &attr, prom_server, NULL) != 0) {
         perror("prometheus: pthread_create");
@@ -2043,6 +2060,19 @@ int main(int argc, char *argv[]) {
     /* On Tegra/Jetson, NVML returns SUCCESS but zeros for util/temp — prefer sysfs */
     if (tegra_gpu_available)
         use_tegra_gpu = 1;
+
+    /* Detect CPU count and allocate arrays */
+    max_cpus = (int)sysconf(_SC_NPROCESSORS_CONF);
+    if (max_cpus < 1) max_cpus = 1;
+    max_cpus += 16; /* headroom for hotplug */
+    prev_ticks = calloc(max_cpus + 1, sizeof(CpuTick));
+    cur_ticks  = calloc(max_cpus + 1, sizeof(CpuTick));
+    cpu_pct    = calloc(max_cpus + 1, sizeof(double));
+    cpu_part   = calloc(max_cpus, sizeof(unsigned int));
+    if (!prev_ticks || !cur_ticks || !cpu_pct || !cpu_part) {
+        fprintf(stderr, "Failed to allocate CPU arrays for %d cores\n", max_cpus);
+        return 1;
+    }
 
     /* Initial CPU tick read */
     read_cpu_ticks(prev_ticks, &num_cpus);

@@ -35,6 +35,17 @@ Everything is in `nv-monitor.c` (~1640 lines). Key sections:
 - **CSV logging**: Opt-in via `-l FILE`, writes timestamped rows with all CPU/memory/GPU metrics. Shares derived calculations with the TUI via `meminfo_calc()`.
 - **Prometheus exporter**: Opt-in via `-p PORT`. Runs a minimal HTTP server on a dedicated pthread, serving OpenMetrics-formatted metrics at `/metrics`. Uses POSIX sockets with `poll()` for clean shutdown. Zero overhead when not enabled. Enables multi-machine monitoring via Prometheus/Grafana.
 
+## Memory allocation (CRITICAL — do not add runtime allocations)
+
+All memory is allocated once at startup, sized to the detected hardware. **Zero allocations occur in any per-frame, per-log, or per-scrape code path.** This is a long-running application that must run for weeks with no memory growth.
+
+- CPU arrays are dynamically sized to `sysconf(_SC_NPROCESSORS_CONF)` at startup
+- GPU arrays are sized to `gpu_count` from NVML at startup
+- Prometheus buffers are pre-allocated when the server thread starts
+- The `compute_cpu_usage()`, `draw_screen()`, `log_csv_row()`, and `format_metrics()` functions must NEVER call malloc/calloc/realloc
+
+If you need to add new data collection, allocate the buffer at startup alongside the existing arrays — not in the hot path. Run `./soak-test.sh 10` after any changes to verify RSS stability.
+
 ## Locale / decimal separator (CRITICAL for Prometheus)
 
 The Prometheus exposition format **requires** decimal points (`1.23`), never commas (`1,23`). The TUI needs `setlocale(LC_ALL, "")` for Unicode support (ncursesw), but on systems with non-English locales (e.g. `es_ES.UTF-8`), `printf("%.2f")` produces commas, which causes Prometheus scrape parse errors (`up=0`).
