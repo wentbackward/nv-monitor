@@ -1655,9 +1655,14 @@ static void draw_screen(void) {
         int first_core = cpu_scroll * ncols;
         int last_core = (cpu_scroll + cpu_max_rows) * ncols - 1;
         if (last_core >= num_cpus) last_core = num_cpus - 1;
+        const char *up   = (cpu_scroll > 0) ? "\xe2\x86\x91" : " ";        /* ↑ */
+        const char *down = (cpu_scroll < max_scroll) ? "\xe2\x86\x93" : " "; /* ↓ */
         attron(COLOR_PAIR(8));
-        printw("  [%d-%d of %d]", first_core, last_core, num_cpus);
+        printw("  [%d-%d of %d] ", first_core, last_core, num_cpus);
         attroff(COLOR_PAIR(8));
+        attron(A_BOLD | COLOR_PAIR(6));
+        printw("%s%s", up, down);
+        attroff(A_BOLD | COLOR_PAIR(6));
     }
 
     attron(A_BOLD);
