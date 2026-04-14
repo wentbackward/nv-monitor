@@ -144,6 +144,19 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
+          append_body: true
+          body: |
+
+            ## Which binary should I download?
+
+            | File | Use on |
+            |------|--------|
+            | `nv-monitor-linux-arm64` | Modern aarch64 Linux (Ubuntu 24.04+, glibc 2.39+). **DGX Spark.** |
+            | `nv-monitor-linux-arm64-legacy` | Older aarch64 Linux (glibc 2.35+). **Jetson Orin / JetPack 5/6.** Also works on newer systems. |
+            | `nv-monitor-linux-amd64` | x86_64 Linux with an NVIDIA GPU. |
+            | `demo-load-linux-*` | Companion synthetic load generator for testing. Same platform rules as nv-monitor. |
+
+            If in doubt on arm64, pick `-legacy` — it works almost everywhere.
           files: |
             nv-monitor-linux-arm64
             nv-monitor-linux-amd64
