@@ -91,6 +91,7 @@ sudo make install
 
 | Flag      | Description                                | Default |
 |-----------|--------------------------------------------|---------|
+| `-c COLS` | CPU display columns (1-4, 0=auto)          | auto    |
 | `-l FILE` | Log statistics to CSV file                 | off     |
 | `-i MS`   | Log interval in milliseconds               | 1000    |
 | `-n`      | Headless mode (no TUI, requires `-l`/`-p`) | off     |
@@ -102,11 +103,15 @@ sudo make install
 
 ### Interactive controls
 
-| Key     | Action                              |
-|---------|-------------------------------------|
-| `q`/Esc | Quit                                |
-| `s`     | Toggle sort (GPU memory / PID)      |
-| `+`/`-` | Adjust refresh rate (250ms steps)   |
+| Key         | Action                                       |
+|-------------|----------------------------------------------|
+| `q`/Esc     | Quit                                         |
+| `s`         | Toggle sort (GPU memory / PID)               |
+| `c`         | Cycle CPU column count (auto → 1 → 2 → 3 → 4)|
+| `j`/`k` or ↑/↓ | Scroll CPU cores when they exceed the viewport |
+| `+`/`-`     | Adjust refresh rate (250ms steps)            |
+
+The CPU section auto-selects the column count based on terminal width and adapts on resize. When cores exceed the available vertical space, a scroll indicator `[first-last] ↑↓` appears on the CPU header line. Use `-c N` to override the auto column count at startup.
 
 ## Prometheus Metrics
 

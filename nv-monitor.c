@@ -204,6 +204,7 @@ static int delay_ms = REFRESH_MS;
 static double last_gpu_util = 0; /* average GPU util captured during draw for history */
 static int cpu_columns = 0;  /* 0 = auto, 1-4 = user override */
 static int cpu_scroll  = 0;  /* first visible core row offset */
+static int skip_history_once = 0; /* suppress history chart for one frame after resize */
 
 /* Command-line options */
 static FILE *log_fp = NULL;
@@ -844,11 +845,16 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
     int cpu_w = bar_w / 2;
     int gpu_w = bar_w - cpu_w;
 
+    /* Clamp visible samples to what fits in avail_w. On very narrow terminals
+     * this shows fewer samples rather than overflowing into other lines. */
+    int max_visible = avail_w / col_w;
+    if (max_visible < 1) return;
     int visible = n;
+    if (visible > max_visible) visible = max_visible;
 
-    /* Right-align: new samples appear on the right, chart grows leftward */
-    int chart_total = HISTORY_LEN * col_w;
-    int x_start = left_x + (avail_w - chart_total) + (HISTORY_LEN - visible) * col_w;
+    /* Right-align: new samples appear on the right */
+    int chart_total = visible * col_w;
+    int x_start = right_x - chart_total;
 
     for (int s = 0; s < visible; s++) {
         int idx = (history_pos - visible + s + HISTORY_LEN) % HISTORY_LEN;
@@ -893,8 +899,8 @@ static void draw_history_chart(int top_y, int total_w, int chart_h) {
 
     /* X-axis: t-N labels (seconds ago), right-aligned with 0 on the right */
     int x_row = top_y + chart_h;
-    for (int t = 0; t < HISTORY_LEN; t += 5) {
-        int s = HISTORY_LEN - 1 - t; /* sample index from right */
+    for (int t = 0; t < visible; t += 5) {
+        int s = visible - 1 - t; /* sample index from right */
         int x = x_start + s * col_w;
         if (x >= left_x && x < right_x - 2)
             mvprintw(x_row, x, "%-3d", t);
@@ -1630,9 +1636,30 @@ static void draw_screen(void) {
     int total_core_rows = (num_cpus + ncols - 1) / ncols;
     if (total_core_rows < 1 && num_cpus > 0) total_core_rows = 1;
 
-    /* CPU vertical budget: total rows minus fixed sections */
-    int fixed_rows = 15 + (gpu_count > 3 ? 12 : gpu_count * 4);
+    /* Narrow terminal: put "Overall:" on its own line to avoid collision */
+    int narrow_header = (cols < 90);
+
+    /* CPU vertical budget: total rows minus fixed sections.
+     * Per-GPU estimate: header(1) + util(1) + vram(1) + enc/dec(1) + blank(1)
+     * + proc header(1) + ~2 procs(2) + other row(1) = ~10 rows.
+     * Cap at 3 GPUs visible — beyond that, scrolling the GPU section is a
+     * separate problem. */
+    int gpu_rows = (gpu_count == 0 ? 0 :
+                    (gpu_count > 3 ? 30 : (int)gpu_count * 10));
+    int header_rows_extra = narrow_header ? 1 : 0;
+    /* base: title(2) + CPU header(1) + blank(1) + mem(3) + blank(1) +
+     * separator(1) + blank(1) + footer(1) = 11 */
+    int base_fixed = 11 + gpu_rows + header_rows_extra;
+    int history_rows = 7;
+    int fixed_rows = base_fixed + history_rows;
     int cpu_max_rows = rows - fixed_rows;
+    /* If too cramped, drop history to give cores more room */
+    int show_history = 1;
+    if (cpu_max_rows < 5) {
+        show_history = 0;
+        fixed_rows = base_fixed;
+        cpu_max_rows = rows - fixed_rows;
+    }
     if (cpu_max_rows < 3) cpu_max_rows = 3;
     if (cpu_max_rows > total_core_rows) cpu_max_rows = total_core_rows;
 
@@ -1649,8 +1676,6 @@ static void draw_screen(void) {
     mvprintw(y, 1, "CPU");
     attroff(A_BOLD | COLOR_PAIR(3));
     printw("  %d cores", num_cpus);
-    if (cpu_freq > 0) printw("  %d MHz", cpu_freq);
-    if (cpu_temp > 0) printw("  %d C", cpu_temp);
     if (scrollable) {
         int first_core = cpu_scroll * ncols;
         int last_core = (cpu_scroll + cpu_max_rows) * ncols - 1;
@@ -1658,17 +1683,30 @@ static void draw_screen(void) {
         const char *up   = (cpu_scroll > 0) ? "\xe2\x86\x91" : " ";        /* ↑ */
         const char *down = (cpu_scroll < max_scroll) ? "\xe2\x86\x93" : " "; /* ↓ */
         attron(COLOR_PAIR(8));
-        printw("  [%d-%d of %d] ", first_core, last_core, num_cpus);
+        printw(" [%d-%d] ", first_core, last_core);
         attroff(COLOR_PAIR(8));
         attron(A_BOLD | COLOR_PAIR(6));
         printw("%s%s", up, down);
         attroff(A_BOLD | COLOR_PAIR(6));
     }
+    if (cpu_freq > 0) printw("  %d MHz", cpu_freq);
+    if (cpu_temp > 0) printw("  %d C", cpu_temp);
 
-    attron(A_BOLD);
-    mvprintw(y, cols / 2 + 1, "Overall: ");
-    attroff(A_BOLD);
-    {
+    if (narrow_header) {
+        /* Overall bar on its own line (full width) */
+        y += 1;
+        attron(A_BOLD);
+        mvprintw(y, 1, "Overall:");
+        attroff(A_BOLD);
+        int bw = cols - 19;
+        if (bw < 10) bw = 10;
+        int color = cpu_pct[0] > 90 ? 1 : (cpu_pct[0] > 60 ? 3 : 2);
+        draw_bar(y, 11, bw, cpu_pct[0], color);
+        mvprintw(y, 11 + bw, " %4.1f%%", cpu_pct[0]);
+    } else {
+        attron(A_BOLD);
+        mvprintw(y, cols / 2 + 1, "Overall: ");
+        attroff(A_BOLD);
         int bw = cols / 2 - 17;
         if (bw < 10) bw = 10;
         int color = cpu_pct[0] > 90 ? 1 : (cpu_pct[0] > 60 ? 3 : 2);
@@ -1962,8 +2000,8 @@ static void draw_screen(void) {
                     else
                         snprintf(mb, sizeof(mb), "N/A");
 
-                    int name_max = cols - 54;
-                    if (name_max < 10) name_max = 10;
+                    int name_max = cols - 52;
+                    if (name_max < 0) name_max = 0;
                     char truncname[256];
                     snprintf(truncname, sizeof(truncname), "%-.*s", name_max, p->name);
 
@@ -1998,13 +2036,14 @@ static void draw_screen(void) {
 
     /* ── History chart (full width) ───────────────────────────────── */
     record_history(cpu_pct[0], last_gpu_util);
-    {
+    if (show_history && !skip_history_once) {
         int chart_h = 5;
         int chart_top = rows - 3 - chart_h; /* -3: footer + x-axis + gap */
         if (chart_top > y + 1 && cols > 20) {
             draw_history_chart(chart_top, cols, chart_h);
         }
     }
+    skip_history_once = 0;
 
     /* ── Footer ─────────────────────────────────────────────────────── */
     attron(COLOR_PAIR(8));
@@ -2205,15 +2244,19 @@ int main(int argc, char *argv[]) {
                 } else if (ch == 'c' || ch == 'C') {
                     cpu_columns = (cpu_columns + 1) % 5; /* 0=auto,1,2,3,4 */
                     cpu_scroll = 0;
+                    skip_history_once = 1;
                     break;
                 } else if (ch == 'j' || ch == KEY_DOWN) {
                     cpu_scroll++;
+                    skip_history_once = 1;
                     break;
                 } else if (ch == 'k' || ch == KEY_UP) {
                     if (cpu_scroll > 0) cpu_scroll--;
+                    skip_history_once = 1;
                     break;
                 } else if (ch == KEY_RESIZE) {
                     cpu_scroll = 0;
+                    skip_history_once = 1;
                     break; /* redraw immediately */
                 }
                 usleep(50000);
