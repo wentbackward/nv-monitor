@@ -11,7 +11,7 @@ jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libncurses-dev
@@ -23,13 +23,13 @@ jobs:
         run: make test
 
       - name: Upload nv-monitor
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nv-monitor-linux-arm64
           path: nv-monitor
 
       - name: Upload demo-load
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: demo-load-linux-arm64
           path: demo-load
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     container: ubuntu:22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: apt-get update && apt-get install -y build-essential libncurses-dev git
@@ -51,13 +51,13 @@ jobs:
         run: make test
 
       - name: Upload nv-monitor
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nv-monitor-linux-arm64-legacy
           path: nv-monitor
 
       - name: Upload demo-load
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: demo-load-linux-arm64-legacy
           path: demo-load
@@ -65,7 +65,7 @@ jobs:
   build-amd64:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libncurses-dev
@@ -77,13 +77,13 @@ jobs:
         run: make test
 
       - name: Upload nv-monitor
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nv-monitor-linux-amd64
           path: nv-monitor
 
       - name: Upload demo-load
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: demo-load-linux-amd64
           path: demo-load
@@ -96,37 +96,37 @@ jobs:
       contents: write
     steps:
       - name: Download arm64 artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nv-monitor-linux-arm64
           path: arm64
 
       - name: Download arm64 demo-load
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: demo-load-linux-arm64
           path: arm64
 
       - name: Download arm64-legacy artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nv-monitor-linux-arm64-legacy
           path: arm64-legacy
 
       - name: Download arm64-legacy demo-load
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: demo-load-linux-arm64-legacy
           path: arm64-legacy
 
       - name: Download amd64 artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nv-monitor-linux-amd64
           path: amd64
 
       - name: Download amd64 demo-load
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: demo-load-linux-amd64
           path: amd64
@@ -142,7 +142,7 @@ jobs:
           chmod +x nv-monitor-linux-* demo-load-linux-*
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             nv-monitor-linux-arm64
