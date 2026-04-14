@@ -202,6 +202,8 @@ static volatile sig_atomic_t g_quit = 0;
 static int sort_mode = 0; /* 0=by mem, 1=by pid */
 static int delay_ms = REFRESH_MS;
 static double last_gpu_util = 0; /* average GPU util captured during draw for history */
+static int cpu_columns = 0;  /* 0 = auto, 1-4 = user override */
+static int cpu_scroll  = 0;  /* first visible core row offset */
 
 /* Command-line options */
 static FILE *log_fp = NULL;
@@ -1556,6 +1558,7 @@ static void print_usage(const char *prog) {
         "Usage: %s [OPTIONS]\n"
         "\n"
         "Options:\n"
+        "  -c COLS   CPU display columns (1-4, default: auto)\n"
         "  -l FILE   Log statistics to CSV file\n"
         "  -i MS     Log interval in milliseconds (default: 1000)\n"
         "  -n        No UI (headless mode, requires -l or -p)\n"
@@ -1614,18 +1617,54 @@ static void draw_screen(void) {
     int cpu_temp = read_cpu_temp();
     int cpu_freq = read_cpu_freq_mhz();
 
+    /* Auto-calculate column count: ~36 chars per column minimum */
+    int ncols;
+    if (cpu_columns > 0) {
+        ncols = cpu_columns;
+    } else {
+        ncols = cols / 36;
+        if (ncols < 1) ncols = 1;
+        if (ncols > 4) ncols = 4;
+    }
+    /* Don't have more columns than cores */
+    int total_core_rows = (num_cpus + ncols - 1) / ncols;
+    if (total_core_rows < 1 && num_cpus > 0) total_core_rows = 1;
+
+    /* CPU vertical budget: total rows minus fixed sections */
+    int fixed_rows = 15 + (gpu_count > 3 ? 12 : gpu_count * 4);
+    int cpu_max_rows = rows - fixed_rows;
+    if (cpu_max_rows < 3) cpu_max_rows = 3;
+    if (cpu_max_rows > total_core_rows) cpu_max_rows = total_core_rows;
+
+    /* Clamp scroll */
+    int max_scroll = total_core_rows - cpu_max_rows;
+    if (max_scroll < 0) max_scroll = 0;
+    if (cpu_scroll > max_scroll) cpu_scroll = max_scroll;
+    if (cpu_scroll < 0) cpu_scroll = 0;
+
+    int scrollable = (total_core_rows > cpu_max_rows);
+
+    /* CPU header */
     attron(A_BOLD | COLOR_PAIR(3));
     mvprintw(y, 1, "CPU");
     attroff(A_BOLD | COLOR_PAIR(3));
     printw("  %d cores", num_cpus);
     if (cpu_freq > 0) printw("  %d MHz", cpu_freq);
     if (cpu_temp > 0) printw("  %d C", cpu_temp);
+    if (scrollable) {
+        int first_core = cpu_scroll * ncols;
+        int last_core = (cpu_scroll + cpu_max_rows) * ncols - 1;
+        if (last_core >= num_cpus) last_core = num_cpus - 1;
+        attron(COLOR_PAIR(8));
+        printw("  [%d-%d of %d]", first_core, last_core, num_cpus);
+        attroff(COLOR_PAIR(8));
+    }
 
     attron(A_BOLD);
     mvprintw(y, cols / 2 + 1, "Overall: ");
     attroff(A_BOLD);
     {
-        int bw = cols / 2 - 17; /* 10 label + 7 suffix " xxx.x%" */
+        int bw = cols / 2 - 17;
         if (bw < 10) bw = 10;
         int color = cpu_pct[0] > 90 ? 1 : (cpu_pct[0] > 60 ? 3 : 2);
         draw_bar(y, cols / 2 + 10, bw, cpu_pct[0], color);
@@ -1633,40 +1672,30 @@ static void draw_screen(void) {
     }
     y += 1;
 
-    /* Per-core bars - two columns */
-    int half = (num_cpus + 1) / 2;
+    /* Per-core bars - N columns, scrollable */
     int lbl_w = 9; /* "XX YYYY " — core number + type label */
-    int bar_w = cols / 2 - lbl_w - 7; /* label + suffix " xxx.x%" */
+    int col_w = cols / ncols;
+    int bar_w = col_w - lbl_w - 8; /* label + suffix " xxx.x%" + margin */
     if (bar_w < 5) bar_w = 5;
 
-    for (int i = 0; i < half; i++) {
-        int cpu_l = i;
-        int cpu_r = i + half;
+    int visible = cpu_max_rows;
+    for (int r = 0; r < visible; r++) {
+        for (int c = 0; c < ncols; c++) {
+            int core_idx = (cpu_scroll + r) * ncols + c;
+            if (core_idx >= num_cpus) break;
+            int x = c * col_w + 1;
 
-        /* Left column */
-        int color = cpu_pct[cpu_l + 1] > 90 ? 1 : (cpu_pct[cpu_l + 1] > 60 ? 3 : 2);
-        const char *lbl_l = cpu_part_label(cpu_l);
-        mvprintw(y, 1, "%2d ", cpu_l);
-        attron(COLOR_PAIR(8));
-        printw("%-4s ", lbl_l);
-        attroff(COLOR_PAIR(8));
-        draw_bar(y, 1 + lbl_w, bar_w, cpu_pct[cpu_l + 1], color);
-        mvprintw(y, 1 + lbl_w + bar_w, " %4.1f%%", cpu_pct[cpu_l + 1]);
-
-        /* Right column */
-        if (cpu_r < num_cpus) {
-            int rx = cols / 2 + 1;
-            color = cpu_pct[cpu_r + 1] > 90 ? 1 : (cpu_pct[cpu_r + 1] > 60 ? 3 : 2);
-            const char *lbl_r = cpu_part_label(cpu_r);
-            mvprintw(y, rx, "%2d ", cpu_r);
+            int color = cpu_pct[core_idx + 1] > 90 ? 1 :
+                       (cpu_pct[core_idx + 1] > 60 ? 3 : 2);
+            const char *lbl = cpu_part_label(core_idx);
+            mvprintw(y, x, "%2d ", core_idx);
             attron(COLOR_PAIR(8));
-            printw("%-4s ", lbl_r);
+            printw("%-4s ", lbl);
             attroff(COLOR_PAIR(8));
-            draw_bar(y, rx + lbl_w - 1, bar_w, cpu_pct[cpu_r + 1], color);
-            mvprintw(y, rx + lbl_w - 1 + bar_w, " %4.1f%%", cpu_pct[cpu_r + 1]);
+            draw_bar(y, x + lbl_w, bar_w, cpu_pct[core_idx + 1], color);
+            mvprintw(y, x + lbl_w + bar_w, " %4.1f%%", cpu_pct[core_idx + 1]);
         }
         y++;
-        if (y >= rows - 2) break;
     }
 
     y += 1;
@@ -1986,6 +2015,14 @@ static void draw_screen(void) {
     attroff(A_BOLD | COLOR_PAIR(7));
     printw(":sort ");
     attron(A_BOLD | COLOR_PAIR(7));
+    printw("c");
+    attroff(A_BOLD | COLOR_PAIR(7));
+    printw(":cols ");
+    attron(A_BOLD | COLOR_PAIR(7));
+    printw("j/k");
+    attroff(A_BOLD | COLOR_PAIR(7));
+    printw(":scroll ");
+    attron(A_BOLD | COLOR_PAIR(7));
     printw("+/-");
     attroff(A_BOLD | COLOR_PAIR(7));
     printw(":speed  ");
@@ -2011,8 +2048,9 @@ int main(int argc, char *argv[]) {
 
     const char *log_path = NULL;
     int opt;
-    while ((opt = getopt(argc, argv, "l:i:np:t:r:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "c:l:i:np:t:r:vh")) != -1) {
         switch (opt) {
+        case 'c': cpu_columns = atoi(optarg); if (cpu_columns < 0 || cpu_columns > 4) cpu_columns = 0; break;
         case 'l': log_path = optarg; break;
         case 'i': log_interval_ms = atoi(optarg); break;
         case 'n': no_ui = 1; break;
@@ -2159,7 +2197,18 @@ int main(int argc, char *argv[]) {
                     if (delay_ms > 250) delay_ms -= 250;
                 } else if (ch == '-' || ch == '_') {
                     if (delay_ms < 5000) delay_ms += 250;
+                } else if (ch == 'c' || ch == 'C') {
+                    cpu_columns = (cpu_columns + 1) % 5; /* 0=auto,1,2,3,4 */
+                    cpu_scroll = 0;
+                    break;
+                } else if (ch == 'j' || ch == KEY_DOWN) {
+                    cpu_scroll++;
+                    break;
+                } else if (ch == 'k' || ch == KEY_UP) {
+                    if (cpu_scroll > 0) cpu_scroll--;
+                    break;
                 } else if (ch == KEY_RESIZE) {
+                    cpu_scroll = 0;
                     break; /* redraw immediately */
                 }
                 usleep(50000);
