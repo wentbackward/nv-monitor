@@ -76,16 +76,60 @@ The NVML shared library code is mapped into physical memory once by the kernel a
 
 The Prometheus server thread uses `poll()` with a 1-second timeout and only wakes on incoming scrape requests. Between scrapes, it consumes zero CPU.
 
-## Methodology
+## Memory allocation model
 
-Results collected using `bench.sh` included in this repository. Run it on any target device:
+nv-monitor uses dynamic memory allocation sized to the hardware it detects at startup. No fixed-size arrays — a 6-core Jetson and a 208-GPU GB200 NVL both get exactly the memory they need.
 
-```bash
-./bench.sh
+**All allocations happen at startup. Zero allocations occur during normal operation.**
+
+This is a deliberate design choice for a long-running monitoring tool. There is no memory growth over time, no fragmentation, no malloc/free churn in any hot path. The application can run for weeks with RSS completely stable.
+
+### Allocation table
+
+| Buffer | Sized to | When allocated | When freed |
+|--------|----------|----------------|------------|
+| `prev_ticks` (CPU tick snapshots) | `num_cpus + 1` | Program start | Program exit |
+| `cur_ticks` (current frame ticks) | `num_cpus + 1` | Program start | Program exit |
+| `cpu_pct` (per-core utilization) | `num_cpus + 1` | Program start | Program exit |
+| `cpu_part` (ARM core type IDs) | `num_cpus` | Program start | Program exit |
+| `prom_body` (HTTP response buffer) | `gpu_count + num_cpus` | Prometheus thread start | Thread exit |
+| `prom_gpus` (GPU snapshot array) | `gpu_count` | Prometheus thread start | Thread exit |
+
+**Functions that execute per-frame (every 1s):** `compute_cpu_usage()`, `draw_screen()`, `log_csv_row()` — zero allocations.
+
+**Functions that execute per-scrape (every 15-30s):** `format_metrics()`, `prom_handle()` — zero allocations, reuse pre-allocated buffers.
+
+### Soak test results
+
+Tested at maximum collection rate (100ms log interval + 2 scrapes/sec) for sustained periods:
+
+```
+DGX Spark — 2 minutes, 1215 CSV rows, ~240 Prometheus scrapes:
+  RSS start: 20920 KB
+  RSS end:   20932 KB
+  RSS delta: +12 KB (one-time kernel page table expansion, stabilised in <5s)
 ```
 
-The script measures:
+The +12 KB delta is not a leak — it's a one-time kernel memory mapping expansion that occurs on the first few `/proc` reads. RSS was completely flat from second 5 through to the end of the test.
+
+Run `./soak-test.sh [minutes]` to verify on any target device. Default is 10 minutes; for production validation use `./soak-test.sh 60`.
+
+## Methodology
+
+Results collected using `bench.sh` and `soak-test.sh` included in this repository.
+
+```bash
+./bench.sh              # Resource usage snapshot vs top/htop
+./soak-test.sh 10       # 10-minute memory stability soak test
+```
+
+`bench.sh` measures:
 - Binary sizes
 - RSS, private (unique), and shared memory via `/proc/<pid>/smaps_rollup`
 - CPU usage over a 10-second sample via `/proc/<pid>/stat` tick deltas
 - NVML shared library memory map regions
+
+`soak-test.sh` measures:
+- RSS every 5 seconds under maximum load (100ms logging + Prometheus scraping)
+- CSV row count and file size growth
+- Final RSS delta with pass/fail threshold
