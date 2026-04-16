@@ -67,10 +67,18 @@ Accurately monitor a single machine or an entire cluster with minimal overhead. 
 <td><img src="screenshots/GB200.png" alt="nv-monitor on Jetson"></td>
 </tr>
 </table>
+<table>
+<tr>
+<td><strong>PowerEdge XE9680</strong> (H100 Datacenter Grade) - Compact View</td>
+</tr>
+<tr>
+<td><img src="screenshots/poweredge-xe9680-H100.png" alt="nv-monitor on ARM"></td>
+</tr>
+</table>
 
 ## Download
 
-For the reckless among you, there's a [binary release](https://github.com/wentbackward/nv-monitor/releases) you can download if you don't want to build it yourself.
+There's a [binary release](https://github.com/wentbackward/nv-monitor/releases) built on every release via GitHub CI/CD pipelines.
 
 ## Building
 
