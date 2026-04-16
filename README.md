@@ -50,9 +50,21 @@ Accurately monitor a single machine or an entire cluster with minimal overhead. 
 <td><strong>arm64</strong> (Jetson Orin Nano)</td>
 </tr>
 <tr>
-<td><img src="nv-monitor-arm.png" alt="nv-monitor on ARM"></td>
-<td><img src="nv-monitor-x86.png" alt="nv-monitor on x86"></td>
-<td><img src="nv-monitor-jetson.png" alt="nv-monitor on Jetson"></td>
+<td><img src="screenshots/nv-monitor-arm.png" alt="nv-monitor on ARM"></td>
+<td><img src="screenshots/nv-monitor-x86.png" alt="nv-monitor on x86"></td>
+<td><img src="screenshots/nv-monitor-jetson.png" alt="nv-monitor on Jetson"></td>
+</tr>
+</table>
+<table>
+<tr>
+<td><strong>PowerEdge XE9680</strong> (H100 Datacenter Grade)</td>
+<td><strong>GB200</strong> (Datacenter Grade)</td>
+<td><strong>GB200</strong> (Datacenter Grade)</td>
+</tr>
+<tr>
+<td><img src="screenshots/poweredge-xe9680-H100.png" alt="nv-monitor on ARM"></td>
+<td><img src="screenshots/GB200-2.png" alt="nv-monitor on x86"></td>
+<td><img src="screenshots/GB200.png" alt="nv-monitor on Jetson"></td>
 </tr>
 </table>
 
