@@ -62,9 +62,9 @@ Accurately monitor a single machine or an entire cluster with minimal overhead. 
 <td><strong>GB200</strong> (Datacenter Grade)</td>
 </tr>
 <tr>
-<td><img src="screenshots/poweredge-xe9680-H100.png" alt="nv-monitor on ARM"></td>
-<td><img src="screenshots/GB200-2.png" alt="nv-monitor on x86"></td>
-<td><img src="screenshots/GB200.png" alt="nv-monitor on Jetson"></td>
+<td><img src="screenshots/poweredge-xe9680-H100.png" alt="nv-monitor on PowerEdge XE9680 with H100"></td>
+<td><img src="screenshots/GB200-2.png" alt="nv-monitor on GB200"></td>
+<td><img src="screenshots/GB200.png" alt="nv-monitor on GB200"></td>
 </tr>
 </table>
 
@@ -215,6 +215,7 @@ make demo-load
 |----------|--------|
 | DGX Spark (aarch64, Grace + GB10) | Primary target — full support including unified memory, HugePages, big.LITTLE core labels |
 | GB200 NVL (aarch64, up to 208 GPUs) | Supported — dynamic allocation scales to any CPU/GPU count, scrollable TUI |
+| Dell PowerEdge XE9680 (x86_64, 8x H100) | Tested — 112 cores, 8 GPUs with VRAM, multi-GPU CSV/Prometheus export |
 | Jetson Orin (Nano / NX / AGX) | GPU via Tegra sysfs, A78AE core labels, legacy glibc binary available |
 | Any Linux + NVIDIA GPU (x86_64) | Fully supported — CPU, memory, GPU, processes, Prometheus exporter |
 | Linux without NVIDIA GPU | CPU and memory monitoring only, GPU section shows "NVML not available" |
