@@ -109,6 +109,7 @@ static unsigned int *cpu_part = NULL; /* [max_cpus] */
 
 typedef struct {
     unsigned int  pid;
+    unsigned int  gpu_id;  /* which GPU this process belongs to */
     unsigned long long mem_bytes;
     char          name[256];
     char          user[64];
@@ -205,6 +206,7 @@ static double last_gpu_util = 0; /* average GPU util captured during draw for hi
 static int cpu_columns = 0;  /* 0 = auto, 1-4 = user override */
 static int cpu_scroll  = 0;  /* first visible core row offset */
 static int skip_history_once = 0; /* suppress history chart for one frame after resize */
+static int gpu_view = 0;  /* 0=auto, 1=compact, 2=detailed */
 
 /* Command-line options */
 static FILE *log_fp = NULL;
@@ -1565,6 +1567,7 @@ static void print_usage(const char *prog) {
         "\n"
         "Options:\n"
         "  -c COLS   CPU display columns (1-4, default: auto)\n"
+        "  -g MODE   GPU view mode (auto, compact, detailed)\n"
         "  -l FILE   Log statistics to CSV file\n"
         "  -i MS     Log interval in milliseconds (default: 1000)\n"
         "  -n        No UI (headless mode, requires -l or -p)\n"
@@ -1804,7 +1807,7 @@ static void draw_screen(void) {
     y += 1;
 
     /* ── GPU section ────────────────────────────────────────────────── */
-    if (!nvml_ok) {
+    if (!nvml_ok && !use_tegra_gpu) {
         attron(COLOR_PAIR(1));
         mvprintw(y, 1, "GPU: NVML not available");
         attroff(COLOR_PAIR(1));
@@ -1813,12 +1816,43 @@ static void draw_screen(void) {
         double gpu_util_sum = 0;
         unsigned int gpu_util_n = 0;
 
-        for (unsigned int d = 0; d < gpu_count && y < rows - 4; d++) {
-            nvmlDevice_t dev;
-            if (pNvmlDeviceGetHandleByIndex(d, &dev) != NVML_SUCCESS) continue;
+        /* Determine view mode */
+        int use_compact;
+        if (gpu_view == 1) use_compact = 1;
+        else if (gpu_view == 2) use_compact = 0;
+        else {
+            /* Auto: compact if detailed would overflow */
+            int est_detail_rows = (int)gpu_count * 10;
+            int available = rows - y - 8;
+            use_compact = (est_detail_rows > available && gpu_count > 2);
+        }
 
-            char name[96] = "Unknown";
-            pNvmlDeviceGetName(dev, name, sizeof(name));
+        /* ── Collect GPU data for all GPUs ────────────────────────── */
+        typedef struct {
+            char name[96];
+            unsigned int util_gpu, temp, power_mw, clk_gfx;
+            int has_power, has_mem, has_fan, has_enc, has_dec;
+            unsigned int fan, enc, dec;
+            unsigned long long mem_total, mem_used;
+        } GpuSnapshot;
+
+        /* Use stack array — bounded by gpu_count which was validated at startup */
+        GpuSnapshot gpu_snaps[256]; /* stack, not heap — draw_screen is on main thread */
+        if (gpu_count > 256) gpu_count = 256; /* safety */
+
+        GpuProc all_procs_combined[MAX_GPU_PROCS * 2];
+        int n_all_combined = 0;
+
+        for (unsigned int d = 0; d < gpu_count; d++) {
+            GpuSnapshot *gs = &gpu_snaps[d];
+            memset(gs, 0, sizeof(*gs));
+            snprintf(gs->name, sizeof(gs->name), "Unknown");
+
+            nvmlDevice_t dev;
+            if (pNvmlDeviceGetHandleByIndex &&
+                pNvmlDeviceGetHandleByIndex(d, &dev) != NVML_SUCCESS) continue;
+
+            pNvmlDeviceGetName(dev, gs->name, sizeof(gs->name));
 
             nvmlUtilization_t util = {0};
             if (!use_tegra_gpu && pNvmlDeviceGetUtilizationRates)
@@ -1827,207 +1861,330 @@ static void draw_screen(void) {
                 int tutil = read_tegra_gpu_util();
                 if (tutil >= 0) util.gpu = (unsigned int)tutil;
             }
+            gs->util_gpu = util.gpu;
             gpu_util_sum += (double)util.gpu;
             gpu_util_n++;
 
-            unsigned int temp = 0;
             if (!use_tegra_gpu && pNvmlDeviceGetTemperature)
-                pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
+                pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &gs->temp);
             if (use_tegra_gpu && tegra_gpu_therm_zone >= 0) {
                 int ttemp = read_tegra_gpu_temp();
-                if (ttemp > 0) temp = (unsigned int)ttemp;
+                if (ttemp > 0) gs->temp = (unsigned int)ttemp;
             }
 
-            unsigned int power_mw = 0;
-            int has_power = (pNvmlDeviceGetPowerUsage && pNvmlDeviceGetPowerUsage(dev, &power_mw) == NVML_SUCCESS);
+            gs->has_power = (pNvmlDeviceGetPowerUsage &&
+                             pNvmlDeviceGetPowerUsage(dev, &gs->power_mw) == NVML_SUCCESS);
+            if (pNvmlDeviceGetClockInfo)
+                pNvmlDeviceGetClockInfo(dev, NVML_CLOCK_GRAPHICS, &gs->clk_gfx);
+            gs->has_fan = (pNvmlDeviceGetFanSpeed &&
+                           pNvmlDeviceGetFanSpeed(dev, &gs->fan) == NVML_SUCCESS);
 
-            unsigned int clk_gfx = 0, clk_mem = 0;
-            if (pNvmlDeviceGetClockInfo) {
-                pNvmlDeviceGetClockInfo(dev, NVML_CLOCK_GRAPHICS, &clk_gfx);
-                pNvmlDeviceGetClockInfo(dev, NVML_CLOCK_MEM, &clk_mem);
-            }
-
-            unsigned int fan = 0;
-            int has_fan = (pNvmlDeviceGetFanSpeed && pNvmlDeviceGetFanSpeed(dev, &fan) == NVML_SUCCESS);
-
-            /* GPU header line */
-            attron(A_BOLD | COLOR_PAIR(6));
-            mvprintw(y, 1, "GPU %u", d);
-            attroff(A_BOLD | COLOR_PAIR(6));
-            printw("  %s  %u C", name, temp);
-            if (has_power) printw("  %.1fW", power_mw / 1000.0);
-            if (clk_gfx) printw("  %u MHz", clk_gfx);
-            if (has_fan) printw("  Fan %u%%", fan);
-            y++;
-
-            /* GPU utilization bar */
-            mvprintw(y, 1, "  GPU ");
-            {
-                int bx = 7;
-                int bw = cols - bx - 7; /* leave room for " 100%" */
-                if (bw < 10) bw = 10;
-                int color = util.gpu > 90 ? 1 : (util.gpu > 60 ? 3 : 6);
-                draw_bar(y, bx, bw, (double)util.gpu, color);
-                mvprintw(y, bx + bw + 1, "%3u%%", util.gpu);
-            }
-            y++;
-
-            /* Memory usage */
             nvmlMemory_t mem = {0};
-            int has_mem = (pNvmlDeviceGetMemoryInfo &&
+            gs->has_mem = (pNvmlDeviceGetMemoryInfo &&
                            pNvmlDeviceGetMemoryInfo(dev, &mem) == NVML_SUCCESS &&
                            mem.total > 0);
+            if (gs->has_mem) { gs->mem_total = mem.total; gs->mem_used = mem.used; }
 
-            if (has_mem) {
-                mvprintw(y, 1, "  VRAM");
-                int bx = 7;
-                int bw = cols - bx - 18; /* room for " 12.3G/34.5G" */
-                if (bw < 10) bw = 10;
-                double mem_pct = (double)mem.used / mem.total * 100.0;
-                int color = mem_pct > 90 ? 1 : (mem_pct > 60 ? 3 : 5);
-                draw_bar(y, bx, bw, mem_pct, color);
-                char ub2[16], tb2[16];
-                fmt_bytes(mem.used, ub2, sizeof(ub2));
-                fmt_bytes(mem.total, tb2, sizeof(tb2));
-                mvprintw(y, bx + bw + 1, "%s/%s", ub2, tb2);
-            } else {
-                mvprintw(y, 1, "  VRAM");
-                attron(COLOR_PAIR(7));
-                printw("  unified memory (shared with CPU)");
-                attroff(COLOR_PAIR(7));
-            }
-            y++;
+            unsigned int enc_period = 0, dec_period = 0;
+            gs->has_enc = (pNvmlDeviceGetEncoderUtilization &&
+                           pNvmlDeviceGetEncoderUtilization(dev, &gs->enc, &enc_period) == NVML_SUCCESS);
+            gs->has_dec = (pNvmlDeviceGetDecoderUtilization &&
+                           pNvmlDeviceGetDecoderUtilization(dev, &gs->dec, &dec_period) == NVML_SUCCESS);
 
-            /* Encoder/Decoder utilization if available */
-            unsigned int enc_util = 0, dec_util = 0, enc_period = 0, dec_period = 0;
-            int has_enc = (pNvmlDeviceGetEncoderUtilization &&
-                          pNvmlDeviceGetEncoderUtilization(dev, &enc_util, &enc_period) == NVML_SUCCESS);
-            int has_dec = (pNvmlDeviceGetDecoderUtilization &&
-                          pNvmlDeviceGetDecoderUtilization(dev, &dec_util, &dec_period) == NVML_SUCCESS);
-            if (has_enc || has_dec) {
-                mvprintw(y, 1, "  ");
-                if (has_enc) printw("ENC %u%%  ", enc_util);
-                if (has_dec) printw("DEC %u%%", dec_util);
-                y++;
-            }
-
-            y++;
-
-            /* GPU processes */
+            /* Collect processes for this GPU */
             nvmlProcessInfo_t comp_procs[MAX_GPU_PROCS];
             nvmlProcessInfo_t gfx_procs[MAX_GPU_PROCS];
             unsigned int n_comp = MAX_GPU_PROCS, n_gfx = MAX_GPU_PROCS;
-            GpuProc all_procs[MAX_GPU_PROCS * 2];
-            int n_all = 0;
 
             if (pNvmlDeviceGetComputeRunningProcesses) {
                 int rc = pNvmlDeviceGetComputeRunningProcesses(dev, &n_comp, comp_procs);
                 if (rc != NVML_SUCCESS) n_comp = 0;
-            } else {
-                n_comp = 0;
-            }
+            } else n_comp = 0;
 
             if (pNvmlDeviceGetGraphicsRunningProcesses) {
                 int rc = pNvmlDeviceGetGraphicsRunningProcesses(dev, &n_gfx, gfx_procs);
                 if (rc != NVML_SUCCESS) n_gfx = 0;
-            } else {
-                n_gfx = 0;
-            }
+            } else n_gfx = 0;
 
-            for (unsigned int i = 0; i < n_comp && n_all < MAX_GPU_PROCS * 2; i++) {
-                /* Validate PID — Jetson NVML can return garbage */
+            for (unsigned int i = 0; i < n_comp && n_all_combined < MAX_GPU_PROCS * 2; i++) {
                 if (comp_procs[i].pid == 0 || comp_procs[i].pid > 4194304) continue;
-                GpuProc *p = &all_procs[n_all++];
+                GpuProc *p = &all_procs_combined[n_all_combined++];
                 p->pid = comp_procs[i].pid;
-                unsigned long long mem = comp_procs[i].usedGpuMemory;
-                p->mem_bytes = (mem == 0xFFFFFFFFFFFFFFFFULL) ? 0 : mem;
+                p->gpu_id = d;
+                unsigned long long pmem = comp_procs[i].usedGpuMemory;
+                p->mem_bytes = (pmem == 0xFFFFFFFFFFFFFFFFULL) ? 0 : pmem;
                 p->type = 'C';
                 p->cpu_pct = calc_proc_cpu_pct(p->pid);
                 get_proc_cmdline(p->pid, p->name, sizeof(p->name));
                 get_proc_user(p->pid, p->user, sizeof(p->user));
             }
-            for (unsigned int i = 0; i < n_gfx && n_all < MAX_GPU_PROCS * 2; i++) {
+            for (unsigned int i = 0; i < n_gfx && n_all_combined < MAX_GPU_PROCS * 2; i++) {
                 if (gfx_procs[i].pid == 0 || gfx_procs[i].pid > 4194304) continue;
-                /* Skip duplicates */
                 int dup = 0;
-                for (int j = 0; j < n_all; j++)
-                    if (all_procs[j].pid == gfx_procs[i].pid) { dup = 1; break; }
+                for (int j = 0; j < n_all_combined; j++)
+                    if (all_procs_combined[j].pid == gfx_procs[i].pid) { dup = 1; break; }
                 if (dup) continue;
-                GpuProc *p = &all_procs[n_all++];
+                GpuProc *p = &all_procs_combined[n_all_combined++];
                 p->pid = gfx_procs[i].pid;
-                unsigned long long mem = gfx_procs[i].usedGpuMemory;
-                p->mem_bytes = (mem == 0xFFFFFFFFFFFFFFFFULL) ? 0 : mem;
+                p->gpu_id = d;
+                unsigned long long pmem = gfx_procs[i].usedGpuMemory;
+                p->mem_bytes = (pmem == 0xFFFFFFFFFFFFFFFFULL) ? 0 : pmem;
                 p->type = 'G';
                 p->cpu_pct = calc_proc_cpu_pct(p->pid);
                 get_proc_cmdline(p->pid, p->name, sizeof(p->name));
                 get_proc_user(p->pid, p->user, sizeof(p->user));
             }
+        }
 
-            /* Tegra fallback: scan /proc for GPU device fd holders */
-            if (n_all == 0 && use_tegra_gpu)
-                n_all = scan_tegra_gpu_procs(all_procs, MAX_GPU_PROCS * 2);
+        /* Tegra fallback for process listing */
+        if (n_all_combined == 0 && use_tegra_gpu)
+            n_all_combined = scan_tegra_gpu_procs(all_procs_combined, MAX_GPU_PROCS * 2);
 
-            /* Save snapshots for next frame's delta calculation */
-            update_proc_cpu_snapshots(all_procs, n_all);
+        update_proc_cpu_snapshots(all_procs_combined, n_all_combined);
 
-            /* Sort by memory descending */
-            for (int i = 0; i < n_all - 1; i++)
-                for (int j = i + 1; j < n_all; j++) {
-                    int swap = 0;
-                    if (sort_mode == 0)
-                        swap = all_procs[j].mem_bytes > all_procs[i].mem_bytes;
-                    else
-                        swap = all_procs[j].pid < all_procs[i].pid;
-                    if (swap) {
-                        GpuProc tmp = all_procs[i];
-                        all_procs[i] = all_procs[j];
-                        all_procs[j] = tmp;
+        /* Sort processes */
+        for (int i = 0; i < n_all_combined - 1; i++)
+            for (int j = i + 1; j < n_all_combined; j++) {
+                int sw = 0;
+                if (sort_mode == 0)
+                    sw = all_procs_combined[j].mem_bytes > all_procs_combined[i].mem_bytes;
+                else
+                    sw = all_procs_combined[j].pid < all_procs_combined[i].pid;
+                if (sw) {
+                    GpuProc tmp = all_procs_combined[i];
+                    all_procs_combined[i] = all_procs_combined[j];
+                    all_procs_combined[j] = tmp;
+                }
+            }
+
+        /* ── Render: compact or detailed ──────────────────────────── */
+        if (use_compact) {
+            /* Compact: one row per GPU with mini-bars */
+            int mini_bar_w = 10;
+            attron(A_BOLD | COLOR_PAIR(6));
+            mvprintw(y, 1, " GPU  NAME");
+            attroff(A_BOLD | COLOR_PAIR(6));
+            attron(COLOR_PAIR(8));
+            {
+                int hdr_x = cols > 80 ? 30 : 18;
+                mvprintw(y, hdr_x, "UTIL");
+                mvprintw(y, hdr_x + mini_bar_w + 7, "TEMP  POWER  CLOCK");
+                if (cols > 100) {
+                    int vram_x = hdr_x + mini_bar_w + 32;
+                    mvprintw(y, vram_x, "VRAM");
+                }
+            }
+            attroff(COLOR_PAIR(8));
+            y++;
+
+            for (unsigned int d = 0; d < gpu_count && y < rows - 4; d++) {
+                GpuSnapshot *gs = &gpu_snaps[d];
+
+                /* GPU index */
+                attron(A_BOLD | COLOR_PAIR(6));
+                mvprintw(y, 1, " %3u", d);
+                attroff(A_BOLD | COLOR_PAIR(6));
+
+                /* Name (truncated) */
+                char short_name[32];
+                /* Strip "NVIDIA " prefix for compactness */
+                const char *nm = gs->name;
+                if (strncmp(nm, "NVIDIA ", 7) == 0) nm += 7;
+                int nm_max = cols > 80 ? 22 : 12;
+                snprintf(short_name, sizeof(short_name), "%-.*s", nm_max, nm);
+                printw("  %s", short_name);
+
+                /* Util mini-bar */
+                int bar_x = cols > 80 ? 30 : 18;
+                int util_color = gs->util_gpu > 90 ? 1 : (gs->util_gpu > 60 ? 3 : 6);
+                draw_bar(y, bar_x, mini_bar_w, (double)gs->util_gpu, util_color);
+                mvprintw(y, bar_x + mini_bar_w + 1, "%3u%%", gs->util_gpu);
+
+                /* Temp, power, clock */
+                int info_x = bar_x + mini_bar_w + 7;
+                mvprintw(y, info_x, "%3uC", gs->temp);
+                if (gs->has_power)
+                    mvprintw(y, info_x + 6, "%5.0fW", gs->power_mw / 1000.0);
+                else
+                    mvprintw(y, info_x + 6, "     ");
+                if (gs->clk_gfx)
+                    mvprintw(y, info_x + 13, "%4uMHz", gs->clk_gfx);
+
+                /* VRAM mini-bar (if room and available) */
+                if (cols > 100) {
+                    int vram_x = info_x + 22;
+                    if (gs->has_mem) {
+                        double mem_pct = (double)gs->mem_used / gs->mem_total * 100.0;
+                        int mc = mem_pct > 90 ? 1 : (mem_pct > 60 ? 3 : 5);
+                        draw_bar(y, vram_x, mini_bar_w, mem_pct, mc);
+                        char ub[16], tb2[16];
+                        fmt_bytes(gs->mem_used, ub, sizeof(ub));
+                        fmt_bytes(gs->mem_total, tb2, sizeof(tb2));
+                        mvprintw(y, vram_x + mini_bar_w + 1, "%s/%s", ub, tb2);
+                    } else {
+                        attron(COLOR_PAIR(7));
+                        mvprintw(y, vram_x, "unified");
+                        attroff(COLOR_PAIR(7));
                     }
                 }
+                y++;
+            }
 
-            if (n_all > 0) {
+            y++;
+
+            /* Combined process list with GPU column */
+            if (n_all_combined > 0 && y < rows - 3) {
                 attron(A_BOLD | COLOR_PAIR(7));
-                mvprintw(y, 1, "  %-8s %-12s %-4s %7s %-12s %s",
+                mvprintw(y, 1, " GPU  %-8s %-10s %-4s %7s %-10s %s",
                          "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
                 attroff(A_BOLD | COLOR_PAIR(7));
                 y++;
 
-                for (int i = 0; i < n_all && y < rows - 2; i++) {
-                    GpuProc *p = &all_procs[i];
+                for (int i = 0; i < n_all_combined && y < rows - 2; i++) {
+                    GpuProc *p = &all_procs_combined[i];
                     char mb[16];
-                    if (p->mem_bytes > 0)
-                        fmt_bytes(p->mem_bytes, mb, sizeof(mb));
-                    else
-                        snprintf(mb, sizeof(mb), "N/A");
+                    if (p->mem_bytes > 0) fmt_bytes(p->mem_bytes, mb, sizeof(mb));
+                    else snprintf(mb, sizeof(mb), "N/A");
 
-                    int name_max = cols - 52;
+                    int name_max = cols - 56;
                     if (name_max < 0) name_max = 0;
                     char truncname[256];
                     snprintf(truncname, sizeof(truncname), "%-.*s", name_max, p->name);
 
                     int pc = (p->type == 'C') ? 5 : 7;
-                    mvprintw(y, 1, "  %-8u %-12s ", p->pid, p->user);
+                    attron(COLOR_PAIR(6));
+                    mvprintw(y, 1, " %3u", p->gpu_id);
+                    attroff(COLOR_PAIR(6));
+                    printw("  %-8u %-10s ", p->pid, p->user);
                     attron(COLOR_PAIR(pc));
                     printw("%-4c", p->type);
                     attroff(COLOR_PAIR(pc));
-                    printw(" %6.1f%% %-12s %s", p->cpu_pct, mb, truncname);
+                    printw(" %6.1f%% %-10s %s", p->cpu_pct, mb, truncname);
                     y++;
                 }
 
-                /* Non-GPU processes summary */
+                /* Other processes summary */
                 double gpu_proc_cpu = 0;
-                for (int i = 0; i < n_all; i++)
-                    gpu_proc_cpu += all_procs[i].cpu_pct;
-                /* Scale overall CPU to per-core basis to match process CPU% */
+                for (int i = 0; i < n_all_combined; i++)
+                    gpu_proc_cpu += all_procs_combined[i].cpu_pct;
                 double total_cpu = cpu_pct[0] * num_cpus;
                 double other_cpu = total_cpu - gpu_proc_cpu;
                 if (other_cpu < 0) other_cpu = 0;
                 attron(COLOR_PAIR(8));
-                mvprintw(y, 1, "  %-8s %-12s %-4s %6.1f%%",
-                         "", "", "", other_cpu);
-                printw(" %-12s %s", "", "(other processes)");
+                mvprintw(y, 1, " %3s  %-8s %-10s %-4s %6.1f%%",
+                         "", "", "", "", other_cpu);
+                printw(" %-10s %s", "", "(other processes)");
                 attroff(COLOR_PAIR(8));
                 y++;
+            }
+
+        } else {
+            /* ── Detailed view (existing layout) ──────────────────── */
+            for (unsigned int d = 0; d < gpu_count && y < rows - 4; d++) {
+                GpuSnapshot *gs = &gpu_snaps[d];
+
+                /* GPU header line */
+                attron(A_BOLD | COLOR_PAIR(6));
+                mvprintw(y, 1, "GPU %u", d);
+                attroff(A_BOLD | COLOR_PAIR(6));
+                printw("  %s  %u C", gs->name, gs->temp);
+                if (gs->has_power) printw("  %.1fW", gs->power_mw / 1000.0);
+                if (gs->clk_gfx) printw("  %u MHz", gs->clk_gfx);
+                if (gs->has_fan) printw("  Fan %u%%", gs->fan);
+                y++;
+
+                /* GPU utilization bar */
+                mvprintw(y, 1, "  GPU ");
+                {
+                    int bx = 7;
+                    int bw = cols - bx - 7;
+                    if (bw < 10) bw = 10;
+                    int color = gs->util_gpu > 90 ? 1 : (gs->util_gpu > 60 ? 3 : 6);
+                    draw_bar(y, bx, bw, (double)gs->util_gpu, color);
+                    mvprintw(y, bx + bw + 1, "%3u%%", gs->util_gpu);
+                }
+                y++;
+
+                /* Memory usage */
+                if (gs->has_mem) {
+                    mvprintw(y, 1, "  VRAM");
+                    int bx = 7;
+                    int bw = cols - bx - 18;
+                    if (bw < 10) bw = 10;
+                    double mem_pct = (double)gs->mem_used / gs->mem_total * 100.0;
+                    int color = mem_pct > 90 ? 1 : (mem_pct > 60 ? 3 : 5);
+                    draw_bar(y, bx, bw, mem_pct, color);
+                    char ub2[16], tb2[16];
+                    fmt_bytes(gs->mem_used, ub2, sizeof(ub2));
+                    fmt_bytes(gs->mem_total, tb2, sizeof(tb2));
+                    mvprintw(y, bx + bw + 1, "%s/%s", ub2, tb2);
+                } else {
+                    mvprintw(y, 1, "  VRAM");
+                    attron(COLOR_PAIR(7));
+                    printw("  unified memory (shared with CPU)");
+                    attroff(COLOR_PAIR(7));
+                }
+                y++;
+
+                /* Encoder/Decoder */
+                if (gs->has_enc || gs->has_dec) {
+                    mvprintw(y, 1, "  ");
+                    if (gs->has_enc) printw("ENC %u%%  ", gs->enc);
+                    if (gs->has_dec) printw("DEC %u%%", gs->dec);
+                    y++;
+                }
+
+                y++;
+
+                /* Per-GPU process list */
+                int n_this_gpu = 0;
+                for (int i = 0; i < n_all_combined; i++)
+                    if (all_procs_combined[i].gpu_id == d) n_this_gpu++;
+
+                if (n_this_gpu > 0) {
+                    attron(A_BOLD | COLOR_PAIR(7));
+                    mvprintw(y, 1, "  %-8s %-12s %-4s %7s %-12s %s",
+                             "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
+                    attroff(A_BOLD | COLOR_PAIR(7));
+                    y++;
+
+                    for (int i = 0; i < n_all_combined && y < rows - 2; i++) {
+                        GpuProc *p = &all_procs_combined[i];
+                        if (p->gpu_id != d) continue;
+                        char mb[16];
+                        if (p->mem_bytes > 0) fmt_bytes(p->mem_bytes, mb, sizeof(mb));
+                        else snprintf(mb, sizeof(mb), "N/A");
+
+                        int name_max = cols - 52;
+                        if (name_max < 0) name_max = 0;
+                        char truncname[256];
+                        snprintf(truncname, sizeof(truncname), "%-.*s", name_max, p->name);
+
+                        int pc = (p->type == 'C') ? 5 : 7;
+                        mvprintw(y, 1, "  %-8u %-12s ", p->pid, p->user);
+                        attron(COLOR_PAIR(pc));
+                        printw("%-4c", p->type);
+                        attroff(COLOR_PAIR(pc));
+                        printw(" %6.1f%% %-12s %s", p->cpu_pct, mb, truncname);
+                        y++;
+                    }
+                }
+
+                /* Other processes (only on last GPU in detailed view) */
+                if (d == gpu_count - 1) {
+                    double gpu_proc_cpu = 0;
+                    for (int i = 0; i < n_all_combined; i++)
+                        gpu_proc_cpu += all_procs_combined[i].cpu_pct;
+                    double total_cpu = cpu_pct[0] * num_cpus;
+                    double other_cpu = total_cpu - gpu_proc_cpu;
+                    if (other_cpu < 0) other_cpu = 0;
+                    attron(COLOR_PAIR(8));
+                    mvprintw(y, 1, "  %-8s %-12s %-4s %6.1f%%",
+                             "", "", "", other_cpu);
+                    printw(" %-12s %s", "", "(other processes)");
+                    attroff(COLOR_PAIR(8));
+                    y++;
+                }
             }
         }
 
@@ -2063,6 +2220,10 @@ static void draw_screen(void) {
     attroff(A_BOLD | COLOR_PAIR(7));
     printw(":cols ");
     attron(A_BOLD | COLOR_PAIR(7));
+    printw("g");
+    attroff(A_BOLD | COLOR_PAIR(7));
+    printw(":gpu ");
+    attron(A_BOLD | COLOR_PAIR(7));
     printw("j/k");
     attroff(A_BOLD | COLOR_PAIR(7));
     printw(":scroll ");
@@ -2092,9 +2253,14 @@ int main(int argc, char *argv[]) {
 
     const char *log_path = NULL;
     int opt;
-    while ((opt = getopt(argc, argv, "c:l:i:np:t:r:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "c:g:l:i:np:t:r:vh")) != -1) {
         switch (opt) {
         case 'c': cpu_columns = atoi(optarg); if (cpu_columns < 0 || cpu_columns > 4) cpu_columns = 0; break;
+        case 'g':
+            if (strcmp(optarg, "compact") == 0) gpu_view = 1;
+            else if (strcmp(optarg, "detailed") == 0) gpu_view = 2;
+            else gpu_view = 0;
+            break;
         case 'l': log_path = optarg; break;
         case 'i': log_interval_ms = atoi(optarg); break;
         case 'n': no_ui = 1; break;
@@ -2244,6 +2410,10 @@ int main(int argc, char *argv[]) {
                 } else if (ch == 'c' || ch == 'C') {
                     cpu_columns = (cpu_columns + 1) % 5; /* 0=auto,1,2,3,4 */
                     cpu_scroll = 0;
+                    skip_history_once = 1;
+                    break;
+                } else if (ch == 'g' || ch == 'G') {
+                    gpu_view = (gpu_view + 1) % 3; /* 0=auto,1=compact,2=detailed */
                     skip_history_once = 1;
                     break;
                 } else if (ch == 'j' || ch == KEY_DOWN) {
