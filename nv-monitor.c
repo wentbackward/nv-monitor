@@ -1942,14 +1942,18 @@ static void draw_screen(void) {
 
         update_proc_cpu_snapshots(all_procs_combined, n_all_combined);
 
-        /* Sort processes */
+        /* Sort processes: by GPU index first, then by sort_mode within each GPU */
         for (int i = 0; i < n_all_combined - 1; i++)
             for (int j = i + 1; j < n_all_combined; j++) {
                 int sw = 0;
-                if (sort_mode == 0)
-                    sw = all_procs_combined[j].mem_bytes > all_procs_combined[i].mem_bytes;
-                else
-                    sw = all_procs_combined[j].pid < all_procs_combined[i].pid;
+                if (all_procs_combined[j].gpu_id < all_procs_combined[i].gpu_id)
+                    sw = 1;
+                else if (all_procs_combined[j].gpu_id == all_procs_combined[i].gpu_id) {
+                    if (sort_mode == 0)
+                        sw = all_procs_combined[j].mem_bytes > all_procs_combined[i].mem_bytes;
+                    else
+                        sw = all_procs_combined[j].pid < all_procs_combined[i].pid;
+                }
                 if (sw) {
                     GpuProc tmp = all_procs_combined[i];
                     all_procs_combined[i] = all_procs_combined[j];
