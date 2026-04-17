@@ -83,6 +83,7 @@ static int   nvml_ok = 0;
 static unsigned int gpu_count = 0;      /* number of GPUs detected */
 static int   use_tegra_gpu = 0;         /* prefer Tegra sysfs over NVML for GPU metrics */
 static char  cpu_model_name[128] = "";  /* from /proc/cpuinfo */
+static char  host_name[256] = "";       /* local hostname, shortened before first dot */
 
 /* ── Constants ──────────────────────────────────────────────────────── */
 
@@ -503,6 +504,16 @@ static int read_cpu_freq_mhz(void) {
     return khz / 1000;
 }
 
+static void read_host_name(void) {
+    if (gethostname(host_name, sizeof(host_name) - 1) != 0) {
+        host_name[0] = '\0';
+        return;
+    }
+    host_name[sizeof(host_name) - 1] = '\0';
+    char *dot = strchr(host_name, '.');
+    if (dot) *dot = '\0';
+}
+
 /* Forward declarations for process lookup (used by Tegra GPU scanner) */
 static void get_proc_cmdline(unsigned int pid, char *buf, int len);
 static void get_proc_user(unsigned int pid, char *buf, int len);
@@ -781,6 +792,18 @@ static const char *fmt_bytes(unsigned long long bytes, char *buf, int len) {
     return buf;
 }
 
+static const char *fmt_rate(double bytes_per_sec, char *buf, int len) {
+    if (bytes_per_sec >= (1ULL << 30))
+        snprintf(buf, len, "%.1fG/s", bytes_per_sec / (double)(1ULL << 30));
+    else if (bytes_per_sec >= (1ULL << 20))
+        snprintf(buf, len, "%.1fM/s", bytes_per_sec / (double)(1ULL << 20));
+    else if (bytes_per_sec >= (1ULL << 10))
+        snprintf(buf, len, "%.1fK/s", bytes_per_sec / (double)(1ULL << 10));
+    else
+        snprintf(buf, len, "%.0fB/s", bytes_per_sec);
+    return buf;
+}
+
 /* ── Uptime ─────────────────────────────────────────────────────────── */
 
 static void fmt_uptime(char *buf, int len) {
@@ -919,6 +942,93 @@ static void record_history(double cpu, double gpu) {
     if (history_count < HISTORY_LEN) history_count++;
 }
 
+/* ── Aggregate network throughput ───────────────────────────────────── */
+
+typedef struct {
+    unsigned long long rx_bytes;
+    unsigned long long tx_bytes;
+    double rx_bytes_sec;
+    double tx_bytes_sec;
+    int valid;
+} NetTotals;
+
+static NetTotals net_totals = {0};
+static unsigned long long net_prev_rx = 0;
+static unsigned long long net_prev_tx = 0;
+static struct timespec    net_prev_time;
+static int                net_prev_valid = 0;
+static double             net_scale_bytes_sec = 1024.0 * 1024.0; /* auto-scaling floor: 1 MiB/s */
+
+static void read_net_totals(void) {
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (!f) {
+        net_totals.valid = 0;
+        return;
+    }
+
+    unsigned long long rx_total = 0;
+    unsigned long long tx_total = 0;
+    char line[512];
+    int line_no = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line_no++;
+        if (line_no <= 2) continue;
+
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = '\0';
+
+        char ifname[64];
+        snprintf(ifname, sizeof(ifname), "%s", line);
+        char *name = ifname;
+        while (*name == ' ') name++;
+        if (strcmp(name, "lo") == 0) continue;
+
+        unsigned long long rx_bytes = 0, tx_bytes = 0;
+        unsigned long long discard[14];
+        if (sscanf(colon + 1,
+                   " %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &rx_bytes,
+                   &discard[0], &discard[1], &discard[2], &discard[3], &discard[4], &discard[5], &discard[6],
+                   &tx_bytes,
+                   &discard[7], &discard[8], &discard[9], &discard[10], &discard[11], &discard[12], &discard[13]) == 16) {
+            rx_total += rx_bytes;
+            tx_total += tx_bytes;
+        }
+    }
+    fclose(f);
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double dt = 0.0;
+    if (net_prev_valid) {
+        dt = (now.tv_sec - net_prev_time.tv_sec) +
+             (now.tv_nsec - net_prev_time.tv_nsec) / 1e9;
+        if (dt <= 0) dt = 1.0;
+    }
+
+    net_totals.rx_bytes = rx_total;
+    net_totals.tx_bytes = tx_total;
+    if (net_prev_valid) {
+        net_totals.rx_bytes_sec = (double)(rx_total - net_prev_rx) / dt;
+        net_totals.tx_bytes_sec = (double)(tx_total - net_prev_tx) / dt;
+        if (net_totals.rx_bytes_sec < 0) net_totals.rx_bytes_sec = 0;
+        if (net_totals.tx_bytes_sec < 0) net_totals.tx_bytes_sec = 0;
+    } else {
+        net_totals.rx_bytes_sec = 0;
+        net_totals.tx_bytes_sec = 0;
+    }
+    net_totals.valid = 1;
+    double total_bytes_sec = net_totals.rx_bytes_sec + net_totals.tx_bytes_sec;
+    double decayed_scale = net_scale_bytes_sec * 0.95;
+    if (decayed_scale < 1024.0 * 1024.0) decayed_scale = 1024.0 * 1024.0;
+    net_scale_bytes_sec = total_bytes_sec > decayed_scale ? total_bytes_sec : decayed_scale;
+    net_prev_rx = rx_total;
+    net_prev_tx = tx_total;
+    net_prev_time = now;
+    net_prev_valid = 1;
+}
+
 /* ── RDMA types (used by CSV logging and Prometheus) ───────────────── */
 
 #define MAX_RDMA_PORTS 16
@@ -950,6 +1060,7 @@ static void log_csv_header(FILE *f) {
     fprintf(f, ",cpu_temp_c,cpu_freq_mhz");
     fprintf(f, ",mem_used_kb,mem_total_kb,mem_bufcache_kb");
     fprintf(f, ",swap_used_kb,swap_total_kb");
+    fprintf(f, ",net_rx_Bps,net_tx_Bps");
     for (unsigned int g = 0; g < gpu_count; g++)
         fprintf(f, ",gpu%u_util_pct,gpu%u_temp_c,gpu%u_power_mw,gpu%u_clock_mhz", g, g, g, g);
     for (int i = 0; i < rdma_count; i++)
@@ -982,6 +1093,7 @@ static void log_csv_row(FILE *f) {
     read_meminfo(&mi);
     fprintf(f, ",%llu,%llu,%llu", mi.app_kb, mi.total_kb, mi.bufcache_kb);
     fprintf(f, ",%llu,%llu", mi.swap_used_kb, mi.swap_total_kb);
+    fprintf(f, ",%.0f,%.0f", net_totals.rx_bytes_sec, net_totals.tx_bytes_sec);
 
     /* GPU */
     for (unsigned int g = 0; g < gpu_count; g++) {
@@ -1246,6 +1358,23 @@ static int format_metrics(char *buf, int buflen) {
            "# TYPE nv_swap_used_bytes gauge\n"
            "nv_swap_used_bytes %llu\n",
            mi.swap_total_kb * 1024ULL, mi.swap_used_kb * 1024ULL);
+    }
+
+    if (net_totals.valid) {
+        PM("# HELP nv_network_receive_bytes_total Total bytes received across all non-loopback interfaces\n"
+           "# TYPE nv_network_receive_bytes_total counter\n"
+           "nv_network_receive_bytes_total %llu\n"
+           "# HELP nv_network_transmit_bytes_total Total bytes transmitted across all non-loopback interfaces\n"
+           "# TYPE nv_network_transmit_bytes_total counter\n"
+           "nv_network_transmit_bytes_total %llu\n"
+           "# HELP nv_network_receive_bytes_per_second Aggregate receive throughput across all non-loopback interfaces\n"
+           "# TYPE nv_network_receive_bytes_per_second gauge\n"
+           "nv_network_receive_bytes_per_second %.0f\n"
+           "# HELP nv_network_transmit_bytes_per_second Aggregate transmit throughput across all non-loopback interfaces\n"
+           "# TYPE nv_network_transmit_bytes_per_second gauge\n"
+           "nv_network_transmit_bytes_per_second %.0f\n",
+           net_totals.rx_bytes, net_totals.tx_bytes,
+           net_totals.rx_bytes_sec, net_totals.tx_bytes_sec);
     }
 
     /* GPU — collect data first, then format grouped by metric family */
@@ -1599,21 +1728,49 @@ static void draw_screen(void) {
     int y = 0;
 
     /* ── Header ─────────────────────────────────────────────────────── */
-    attron(A_BOLD | COLOR_PAIR(6));
-    mvprintw(y, 0, " nv-monitor");
-    attroff(A_BOLD | COLOR_PAIR(6));
-    attron(COLOR_PAIR(7));
-    printw("  %s", cpu_model_name[0] ? cpu_model_name : "Unknown CPU");
-    attroff(COLOR_PAIR(7));
-
     char upbuf[64];
     fmt_uptime(upbuf, sizeof(upbuf));
     double l1, l5, l15;
     get_loadavg(&l1, &l5, &l15);
+    int right_x = cols;
     {
         char info[128];
         int len = snprintf(info, sizeof(info), "up %s  load %.2f %.2f %.2f", upbuf, l1, l5, l15);
-        mvprintw(y, cols - len - 1, "%s", info);
+        if (len > 0 && len < cols) {
+            right_x = cols - len - 1;
+            mvprintw(y, right_x, "%s", info);
+        }
+    }
+
+    int x = 0;
+    const char *title = " nv-monitor";
+    int title_len = (int)strlen(title);
+    attron(A_BOLD | COLOR_PAIR(6));
+    mvprintw(y, x, "%s", title);
+    attroff(A_BOLD | COLOR_PAIR(6));
+    x += title_len;
+
+    if (host_name[0] && x < right_x) {
+        char host_label[300];
+        int remaining = right_x - x;
+        int host_len = snprintf(host_label, sizeof(host_label), "  @%s", host_name);
+        if (host_len > remaining) host_len = remaining;
+        if (host_len > 0) {
+            attron(A_BOLD | COLOR_PAIR(3));
+            mvprintw(y, x, "%.*s", host_len, host_label);
+            attroff(A_BOLD | COLOR_PAIR(3));
+            x += host_len;
+        }
+    }
+
+    if (x < right_x) {
+        const char *cpu = cpu_model_name[0] ? cpu_model_name : "Unknown CPU";
+        int remaining = right_x - x;
+        if (remaining > 2) {
+            attron(COLOR_PAIR(7));
+            mvprintw(y, x, "  %.*s", remaining - 2, cpu);
+            attroff(COLOR_PAIR(7));
+        }
     }
     y += 1;
 
@@ -1650,9 +1807,9 @@ static void draw_screen(void) {
     int gpu_rows = (gpu_count == 0 ? 0 :
                     (gpu_count > 3 ? 30 : (int)gpu_count * 10));
     int header_rows_extra = narrow_header ? 1 : 0;
-    /* base: title(2) + CPU header(1) + blank(1) + mem(3) + blank(1) +
-     * separator(1) + blank(1) + footer(1) = 11 */
-    int base_fixed = 11 + gpu_rows + header_rows_extra;
+    /* base: title(2) + CPU header(1) + blank(1) + mem(3) + net(2) + blank(1)
+     * + separator(1) + blank(1) + footer(1) = 13 */
+    int base_fixed = 13 + gpu_rows + header_rows_extra;
     int history_rows = 7;
     int fixed_rows = base_fixed + history_rows;
     int cpu_max_rows = rows - fixed_rows;
@@ -1797,6 +1954,41 @@ static void draw_screen(void) {
             draw_bar(y, 4, bw, swap_pct, color);
             mvprintw(y, 4 + bw, " %.1f%%", swap_pct);
         }
+        y++;
+    }
+
+    if (net_totals.valid) {
+        char rx[16], tx[16], scale[16];
+        attron(A_BOLD | COLOR_PAIR(6));
+        mvprintw(y, 1, "NET");
+        attroff(A_BOLD | COLOR_PAIR(6));
+        attron(COLOR_PAIR(2));
+        printw("  ");
+        printw("%s", fmt_rate(net_totals.rx_bytes_sec, rx, sizeof(rx)));
+        attroff(COLOR_PAIR(2));
+        printw(" down");
+        attron(COLOR_PAIR(3));
+        printw("  %s", fmt_rate(net_totals.tx_bytes_sec, tx, sizeof(tx)));
+        attroff(COLOR_PAIR(3));
+        printw(" up");
+        y++;
+
+        mvprintw(y, 1, "  I/O ");
+        int bw = cols - 24;
+        if (bw < 10) bw = 10;
+        double rx_pct = net_scale_bytes_sec > 0 ? net_totals.rx_bytes_sec / net_scale_bytes_sec * 100.0 : 0;
+        double tx_pct = net_scale_bytes_sec > 0 ? net_totals.tx_bytes_sec / net_scale_bytes_sec * 100.0 : 0;
+        if (rx_pct < 0) rx_pct = 0;
+        if (tx_pct < 0) tx_pct = 0;
+        if (rx_pct + tx_pct > 100.0) {
+            double scale_down = 100.0 / (rx_pct + tx_pct);
+            rx_pct *= scale_down;
+            tx_pct *= scale_down;
+        }
+        draw_bar_segmented(y, 7, bw, rx_pct, tx_pct, 2, 3);
+        attron(COLOR_PAIR(8));
+        mvprintw(y, 7 + bw + 1, "%s peak", fmt_rate(net_scale_bytes_sec, scale, sizeof(scale)));
+        attroff(COLOR_PAIR(8));
         y++;
     }
 
@@ -2303,6 +2495,7 @@ int main(int argc, char *argv[]) {
         pNvmlDeviceGetCount(&gpu_count);
 
     /* Read CPU info */
+    read_host_name();
     read_cpu_model_name();
     read_cpu_part_ids();
 
@@ -2332,6 +2525,7 @@ int main(int argc, char *argv[]) {
     compute_cpu_usage();
 
     /* Detect RDMA/InfiniBand ports */
+    read_net_totals();
     read_rdma_ports();
 
     /* Write CSV header after first CPU sample (so we know num_cpus) */
@@ -2352,6 +2546,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Running headless (Ctrl+C to stop)\n");
         while (!g_quit) {
             compute_cpu_usage();
+            read_net_totals();
             read_rdma_ports();
             if (log_fp) log_csv_row(log_fp);
             usleep(headless_interval * 1000);
@@ -2383,6 +2578,7 @@ int main(int argc, char *argv[]) {
 
         while (!g_quit) {
             compute_cpu_usage();
+            read_net_totals();
             read_rdma_ports();
             /* Force full repaint to recover from terminal corruption */
             clearok(stdscr, TRUE);
