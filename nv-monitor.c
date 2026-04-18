@@ -2040,7 +2040,7 @@ static void draw_screen(void) {
             if (n_all_combined > 0 && y < rows - 3) {
                 attron(A_BOLD | COLOR_PAIR(7));
                 mvprintw(y, 1, " GPU  %-8s %-10s %-4s %9s %-10s %s",
-                         "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
+                         "PID", "USER", "TYPE", "CPU%", "GPU-MEM", "COMMAND");
                 attroff(A_BOLD | COLOR_PAIR(7));
                 y++;
 
@@ -2148,7 +2148,7 @@ static void draw_screen(void) {
                 if (n_this_gpu > 0) {
                     attron(A_BOLD | COLOR_PAIR(7));
                     mvprintw(y, 1, "  %-8s %-12s %-4s %9s %-12s %s",
-                             "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
+                             "PID", "USER", "TYPE", "CPU%", "GPU-MEM", "COMMAND");
                     attroff(A_BOLD | COLOR_PAIR(7));
                     y++;
 
