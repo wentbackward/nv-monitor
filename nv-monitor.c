@@ -2039,7 +2039,7 @@ static void draw_screen(void) {
             /* Combined process list with GPU column */
             if (n_all_combined > 0 && y < rows - 3) {
                 attron(A_BOLD | COLOR_PAIR(7));
-                mvprintw(y, 1, " GPU  %-8s %-10s %-4s %7s %-10s %s",
+                mvprintw(y, 1, " GPU  %-8s %-10s %-4s %9s %-10s %s",
                          "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
                 attroff(A_BOLD | COLOR_PAIR(7));
                 y++;
@@ -2050,7 +2050,7 @@ static void draw_screen(void) {
                     if (p->mem_bytes > 0) fmt_bytes(p->mem_bytes, mb, sizeof(mb));
                     else snprintf(mb, sizeof(mb), "N/A");
 
-                    int name_max = cols - 56;
+                    int name_max = cols - 58;
                     if (name_max < 0) name_max = 0;
                     char truncname[256];
                     snprintf(truncname, sizeof(truncname), "%-.*s", name_max, p->name);
@@ -2063,7 +2063,7 @@ static void draw_screen(void) {
                     attron(COLOR_PAIR(pc));
                     printw("%-4c", p->type);
                     attroff(COLOR_PAIR(pc));
-                    printw(" %6.1f%% %-10s %s", p->cpu_pct, mb, truncname);
+                    printw(" %8.1f%% %-10s %s", p->cpu_pct, mb, truncname);
                     y++;
                 }
 
@@ -2075,7 +2075,7 @@ static void draw_screen(void) {
                 double other_cpu = total_cpu - gpu_proc_cpu;
                 if (other_cpu < 0) other_cpu = 0;
                 attron(COLOR_PAIR(8));
-                mvprintw(y, 1, " %3s  %-8s %-10s %-4s %6.1f%%",
+                mvprintw(y, 1, " %3s  %-8s %-10s %-4s %8.1f%%",
                          "", "", "", "", other_cpu);
                 printw(" %-10s %s", "", "(other processes)");
                 attroff(COLOR_PAIR(8));
@@ -2147,7 +2147,7 @@ static void draw_screen(void) {
 
                 if (n_this_gpu > 0) {
                     attron(A_BOLD | COLOR_PAIR(7));
-                    mvprintw(y, 1, "  %-8s %-12s %-4s %7s %-12s %s",
+                    mvprintw(y, 1, "  %-8s %-12s %-4s %9s %-12s %s",
                              "PID", "USER", "TYPE", "CPU%", "GPU MEM", "COMMAND");
                     attroff(A_BOLD | COLOR_PAIR(7));
                     y++;
@@ -2159,7 +2159,7 @@ static void draw_screen(void) {
                         if (p->mem_bytes > 0) fmt_bytes(p->mem_bytes, mb, sizeof(mb));
                         else snprintf(mb, sizeof(mb), "N/A");
 
-                        int name_max = cols - 52;
+                        int name_max = cols - 54;
                         if (name_max < 0) name_max = 0;
                         char truncname[256];
                         snprintf(truncname, sizeof(truncname), "%-.*s", name_max, p->name);
@@ -2169,7 +2169,7 @@ static void draw_screen(void) {
                         attron(COLOR_PAIR(pc));
                         printw("%-4c", p->type);
                         attroff(COLOR_PAIR(pc));
-                        printw(" %6.1f%% %-12s %s", p->cpu_pct, mb, truncname);
+                        printw(" %8.1f%% %-12s %s", p->cpu_pct, mb, truncname);
                         y++;
                     }
                 }
@@ -2183,7 +2183,7 @@ static void draw_screen(void) {
                     double other_cpu = total_cpu - gpu_proc_cpu;
                     if (other_cpu < 0) other_cpu = 0;
                     attron(COLOR_PAIR(8));
-                    mvprintw(y, 1, "  %-8s %-12s %-4s %6.1f%%",
+                    mvprintw(y, 1, "  %-8s %-12s %-4s %8.1f%%",
                              "", "", "", other_cpu);
                     printw(" %-12s %s", "", "(other processes)");
                     attroff(COLOR_PAIR(8));
