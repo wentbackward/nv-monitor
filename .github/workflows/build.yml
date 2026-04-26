@@ -8,6 +8,17 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Static analysis
+        run: cppcheck --enable=all --suppress=missingIncludeSystem --error-exitcode=1 nv-monitor.c
+
   build-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
