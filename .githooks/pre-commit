@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# pre-commit — run static analysis on staged C files.
+#
+# Requires: cppcheck, clang-tidy-20 (or clang-tidy)
+#
+# Install:
+#   git config core.hooksPath .githooks
+#   chmod +x .githooks/pre-commit
+#
+# Skip (if needed): git commit --no-verify
+#
+
+set -uo pipefail
+
+STAGED_C=$(git diff --cached --name-only --diff-filter=ACM | grep '\.c$' || true)
+[ -z "$STAGED_C" ] && exit 0
+
+RED='\033[0;31m'
+GRN='\033[0;32m'
+YEL='\033[1;33m'
+RST='\033[0m'
+
+WARNINGS=0
+
+for f in $STAGED_C; do
+    echo ""
+    echo "=== $f ==="
+
+    # cppcheck
+    if command -v cppcheck &>/dev/null; then
+        echo "cppcheck:"
+        if ! cppcheck --enable=all --suppress=missingIncludeSystem "$f" 2>&1; then
+            echo -e "${YEL}  ⚠ cppcheck found issues (see above)${RST}"
+            WARNINGS=1
+        else
+            echo -e "${GRN}  ✓ cppcheck clean${RST}"
+        fi
+    fi
+
+    # clang-tidy — only on main source file
+    if [ "$f" = "nv-monitor.c" ]; then
+        if command -v clang-tidy-20 &>/dev/null; then
+            CT="clang-tidy-20"
+        elif command -v clang-tidy &>/dev/null; then
+            CT="clang-tidy"
+        else
+            CT=""
+        fi
+
+        if [ -n "$CT" ]; then
+            echo "clang-tidy:"
+            if ! $CT "$f" -- --std=gnu11 -lncursesw -ldl -lpthread -Wall -Wextra 2>&1; then
+                echo -e "${YEL}  ⚠ clang-tidy found issues (see above)${RST}"
+                WARNINGS=1
+            else
+                echo -e "${GRN}  ✓ clang-tidy clean${RST}"
+            fi
+        fi
+    fi
+done
+
+echo ""
+if [ $WARNINGS -ne 0 ]; then
+    echo -e "${YEL}Lint warnings found — commit allowed, but consider fixing.${RST}"
+    echo "To block commits on lint errors, edit .githooks/pre-commit"
+fi
+
+echo -e "${GRN}Proceeding with commit.${RST}"
+exit 0

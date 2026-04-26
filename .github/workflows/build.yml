@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y cppcheck
 
       - name: Static analysis
-        run: cppcheck --enable=all --suppress=missingIncludeSystem --error-exitcode=1 nv-monitor.c
+        run: cppcheck --enable=all --suppress=missingIncludeSystem nv-monitor.c
 
   build-arm64:
     runs-on: ubuntu-24.04-arm

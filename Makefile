@@ -21,6 +21,12 @@ test: test_meminfo.c
 	$(CC) -O0 -Wall -Wextra -o test_meminfo test_meminfo.c
 	./test_meminfo
 
+lint:
+	@echo "Running cppcheck..."
+	cppcheck --enable=all --suppress=missingIncludeSystem nv-monitor.c
+	@echo "Running clang-tidy..."
+	clang-tidy-20 nv-monitor.c -- --std=gnu11 -lncursesw -ldl -lpthread -Wall -Wextra
+
 clean:
 	rm -f $(TARGET) demo-load test_meminfo
 
@@ -32,4 +38,4 @@ install-user: $(TARGET)
 	install -d $(HOME)/.local/bin
 	install -m 755 $(TARGET) $(HOME)/.local/bin/
 
-.PHONY: all portable test clean install install-user
+.PHONY: all portable test clean install install-user lint

@@ -1,0 +1,23 @@
+---
+# Focused checks for nv-monitor: actual bugs only, not style opinions.
+# Single-file C project — readability nits (braces, short names, etc.)
+# are intentionally skipped to avoid drowning signal in noise.
+
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  performance-*,
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-macro-to-enum,
+  -cppcoreguidelines-narrowing-conversions,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-include-cleaner,
+  -readability-*
+
+WarningsAsErrors: ''
+HeaderFilterRegex: ''
+FormatStyle: none
