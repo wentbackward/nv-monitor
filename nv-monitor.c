@@ -1010,10 +1010,14 @@ static void read_net_totals(void) {
     net_totals.rx_bytes = rx_total;
     net_totals.tx_bytes = tx_total;
     if (net_prev_valid) {
-        net_totals.rx_bytes_sec = (double)(rx_total - net_prev_rx) / dt;
-        net_totals.tx_bytes_sec = (double)(tx_total - net_prev_tx) / dt;
-        if (net_totals.rx_bytes_sec < 0) net_totals.rx_bytes_sec = 0;
-        if (net_totals.tx_bytes_sec < 0) net_totals.tx_bytes_sec = 0;
+        if (rx_total >= net_prev_rx)
+            net_totals.rx_bytes_sec = (double)(rx_total - net_prev_rx) / dt;
+        else
+            net_totals.rx_bytes_sec = 0;  /* counter wrapped, skip frame */
+        if (tx_total >= net_prev_tx)
+            net_totals.tx_bytes_sec = (double)(tx_total - net_prev_tx) / dt;
+        else
+            net_totals.tx_bytes_sec = 0;  /* counter wrapped, skip frame */
     } else {
         net_totals.rx_bytes_sec = 0;
         net_totals.tx_bytes_sec = 0;
@@ -1230,10 +1234,14 @@ static void read_rdma_ports(void) {
 
             /* Rate calculation */
             if (rdma_prev_valid && idx < rdma_count) {
-                r->xmit_bytes_sec = (double)(r->xmit_bytes - rdma_prev_xmit[idx]) / dt;
-                r->recv_bytes_sec = (double)(r->recv_bytes - rdma_prev_recv[idx]) / dt;
-                if (r->xmit_bytes_sec < 0) r->xmit_bytes_sec = 0;
-                if (r->recv_bytes_sec < 0) r->recv_bytes_sec = 0;
+                if (r->xmit_bytes >= rdma_prev_xmit[idx])
+                    r->xmit_bytes_sec = (double)(r->xmit_bytes - rdma_prev_xmit[idx]) / dt;
+                else
+                    r->xmit_bytes_sec = 0;  /* counter wrapped, skip frame */
+                if (r->recv_bytes >= rdma_prev_recv[idx])
+                    r->recv_bytes_sec = (double)(r->recv_bytes - rdma_prev_recv[idx]) / dt;
+                else
+                    r->recv_bytes_sec = 0;  /* counter wrapped, skip frame */
             } else {
                 r->xmit_bytes_sec = 0;
                 r->recv_bytes_sec = 0;
