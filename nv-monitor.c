@@ -209,6 +209,10 @@ static int cpu_scroll  = 0;  /* first visible core row offset */
 static int skip_history_once = 0; /* suppress history chart for one frame after resize */
 static int gpu_view = 0;  /* 0=auto, 1=compact, 2=detailed */
 
+/* Session peak temperatures — monotonic, reset on restart */
+static double peak_cpu_temp_c = 0;
+static double peak_gpu_temp_c = 0; /* max across all GPUs */
+
 /* Command-line options */
 static FILE *log_fp = NULL;
 static int   log_interval_ms = 1000;
@@ -1339,6 +1343,9 @@ static int format_metrics(char *buf, int buflen) {
     PM("# HELP nv_cpu_temperature_celsius CPU temperature\n"
        "# TYPE nv_cpu_temperature_celsius gauge\n"
        "nv_cpu_temperature_celsius %d\n", read_cpu_temp());
+    PM("# HELP nv_cpu_temperature_peak_celsius Highest CPU temperature since nv-monitor started\n"
+       "# TYPE nv_cpu_temperature_peak_celsius gauge\n"
+       "nv_cpu_temperature_peak_celsius %.1f\n", peak_cpu_temp_c);
 
     /* CPU frequency */
     PM("# HELP nv_cpu_frequency_mhz CPU frequency\n"
@@ -1461,6 +1468,10 @@ static int format_metrics(char *buf, int buflen) {
            "# TYPE nv_gpu_temperature_celsius gauge\n");
         for (int d = 0; d < n_gpus; d++)
             PM("nv_gpu_temperature_celsius{gpu=\"%d\"} %u\n", d, gpus[d].temp);
+
+        PM("# HELP nv_gpu_temperature_peak_celsius Highest GPU temperature since nv-monitor started\n"
+           "# TYPE nv_gpu_temperature_peak_celsius gauge\n"
+           "nv_gpu_temperature_peak_celsius %.1f\n", peak_gpu_temp_c);
 
         PM("# HELP nv_gpu_power_watts GPU power draw\n"
            "# TYPE nv_gpu_power_watts gauge\n");
@@ -1791,6 +1802,7 @@ static void draw_screen(void) {
 
     /* ── CPU section ────────────────────────────────────────────────── */
     int cpu_temp = read_cpu_temp();
+    if (cpu_temp > peak_cpu_temp_c) peak_cpu_temp_c = cpu_temp;
     int cpu_freq = read_cpu_freq_mhz();
 
     /* Auto-calculate column count: ~36 chars per column minimum */
@@ -2073,6 +2085,7 @@ static void draw_screen(void) {
                 int ttemp = read_tegra_gpu_temp();
                 if (ttemp > 0) gs->temp = (unsigned int)ttemp;
             }
+            if ((double)gs->temp > peak_gpu_temp_c) peak_gpu_temp_c = gs->temp;
 
             gs->has_power = (pNvmlDeviceGetPowerUsage &&
                              pNvmlDeviceGetPowerUsage(dev, &gs->power_mw) == NVML_SUCCESS);
