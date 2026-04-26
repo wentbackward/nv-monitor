@@ -209,9 +209,28 @@ static int cpu_scroll  = 0;  /* first visible core row offset */
 static int skip_history_once = 0; /* suppress history chart for one frame after resize */
 static int gpu_view = 0;  /* 0=auto, 1=compact, 2=detailed */
 
-/* Session peak temperatures — monotonic, reset on restart */
-static double peak_cpu_temp_c = 0;
-static double peak_gpu_temp_c = 0; /* max across all GPUs */
+/* ── Windowed peak tracking (peak within a 30-minute window) ───────── */
+
+typedef struct {
+    double peak;
+    time_t  ts;
+} WindowedPeak;
+
+#define PEAK_WINDOW_SECS 1800  /* 30 minutes */
+
+static WindowedPeak peak_cpu_pct;
+static WindowedPeak peak_cpu_temp_c;
+static WindowedPeak *peak_gpu_util;     /* [gpu_count] */
+static WindowedPeak *peak_gpu_temp_c;   /* [gpu_count] */
+static WindowedPeak *peak_gpu_power_mw; /* [gpu_count] */
+
+static void update_windowed_peak(WindowedPeak *p, double value) {
+    time_t now = time(NULL);
+    if (now - p->ts > PEAK_WINDOW_SECS || value > p->peak) {
+        p->peak = value;
+        p->ts = now;
+    }
+}
 
 /* Command-line options */
 static FILE *log_fp = NULL;
@@ -1072,6 +1091,10 @@ static void log_csv_header(FILE *f) {
     fprintf(f, ",net_rx_Bps,net_tx_Bps");
     for (unsigned int g = 0; g < gpu_count; g++)
         fprintf(f, ",gpu%u_util_pct,gpu%u_temp_c,gpu%u_power_mw,gpu%u_clock_mhz", g, g, g, g);
+    /* Windowed peaks (30-minute window) */
+    fprintf(f, ",peak_30m_cpu_pct,peak_30m_cpu_temp_c");
+    for (unsigned int g = 0; g < gpu_count; g++)
+        fprintf(f, ",peak_30m_gpu%u_util_pct,peak_30m_gpu%u_temp_c,peak_30m_gpu%u_power_w", g, g, g);
     for (int i = 0; i < rdma_count; i++)
         fprintf(f, ",rdma_%s_p%d_xmit_Bps,rdma_%s_p%d_recv_Bps",
                 rdma_ports[i].device, rdma_ports[i].port,
@@ -1138,6 +1161,13 @@ static void log_csv_row(FILE *f) {
         }
     }
     if (gpu_count == 0) fprintf(f, ",,,,");
+
+    /* Windowed peaks (30-minute window) */
+    fprintf(f, ",%.1f,%.1f", peak_cpu_pct.peak, peak_cpu_temp_c.peak);
+    for (unsigned int g = 0; g < gpu_count; g++) {
+        fprintf(f, ",%.1f,%.1f", peak_gpu_util[g].peak, peak_gpu_temp_c[g].peak);
+        fprintf(f, ",%.1f", peak_gpu_power_mw[g].peak);
+    }
 
     for (int i = 0; i < rdma_count; i++)
         fprintf(f, ",%.0f,%.0f", rdma_ports[i].xmit_bytes_sec, rdma_ports[i].recv_bytes_sec);
@@ -1343,14 +1373,19 @@ static int format_metrics(char *buf, int buflen) {
     PM("# HELP nv_cpu_temperature_celsius CPU temperature\n"
        "# TYPE nv_cpu_temperature_celsius gauge\n"
        "nv_cpu_temperature_celsius %d\n", read_cpu_temp());
-    PM("# HELP nv_cpu_temperature_peak_celsius Highest CPU temperature since nv-monitor started\n"
-       "# TYPE nv_cpu_temperature_peak_celsius gauge\n"
-       "nv_cpu_temperature_peak_celsius %.1f\n", peak_cpu_temp_c);
 
     /* CPU frequency */
     PM("# HELP nv_cpu_frequency_mhz CPU frequency\n"
        "# TYPE nv_cpu_frequency_mhz gauge\n"
        "nv_cpu_frequency_mhz %d\n", read_cpu_freq_mhz());
+
+    /* Windowed peaks (30-minute window) */
+    PM("# HELP nv_cpu_usage_peak_30m_percent Peak CPU utilization over the last 30 minutes\n"
+       "# TYPE nv_cpu_usage_peak_30m_percent gauge\n"
+       "nv_cpu_usage_peak_30m_percent %.1f\n", peak_cpu_pct.peak);
+    PM("# HELP nv_cpu_temperature_peak_30m_celsius Peak CPU temperature over the last 30 minutes\n"
+       "# TYPE nv_cpu_temperature_peak_30m_celsius gauge\n"
+       "nv_cpu_temperature_peak_30m_celsius %.1f\n", peak_cpu_temp_c.peak);
 
     /* Memory */
     MemInfo mi;
@@ -1469,10 +1504,6 @@ static int format_metrics(char *buf, int buflen) {
         for (int d = 0; d < n_gpus; d++)
             PM("nv_gpu_temperature_celsius{gpu=\"%d\"} %u\n", d, gpus[d].temp);
 
-        PM("# HELP nv_gpu_temperature_peak_celsius Highest GPU temperature since nv-monitor started\n"
-           "# TYPE nv_gpu_temperature_peak_celsius gauge\n"
-           "nv_gpu_temperature_peak_celsius %.1f\n", peak_gpu_temp_c);
-
         PM("# HELP nv_gpu_power_watts GPU power draw\n"
            "# TYPE nv_gpu_power_watts gauge\n");
         for (int d = 0; d < n_gpus; d++)
@@ -1517,6 +1548,23 @@ static int format_metrics(char *buf, int buflen) {
         for (int d = 0; d < n_gpus; d++)
             if (gpus[d].has_dec)
                 PM("nv_gpu_decoder_utilization_percent{gpu=\"%d\"} %u\n", d, gpus[d].dec);
+
+        /* Windowed peaks (30-minute window) */
+        PM("# HELP nv_gpu_utilization_peak_30m_percent Peak GPU utilization over the last 30 minutes\n"
+           "# TYPE nv_gpu_utilization_peak_30m_percent gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            PM("nv_gpu_utilization_peak_30m_percent{gpu=\"%d\"} %.1f\n", d, peak_gpu_util[d].peak);
+
+        PM("# HELP nv_gpu_temperature_peak_30m_celsius Peak GPU temperature over the last 30 minutes\n"
+           "# TYPE nv_gpu_temperature_peak_30m_celsius gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            PM("nv_gpu_temperature_peak_30m_celsius{gpu=\"%d\"} %.1f\n", d, peak_gpu_temp_c[d].peak);
+
+        PM("# HELP nv_gpu_power_peak_30m_watts Peak GPU power draw over the last 30 minutes\n"
+           "# TYPE nv_gpu_power_peak_30m_watts gauge\n");
+        for (int d = 0; d < n_gpus; d++)
+            if (gpus[d].has_power)
+                PM("nv_gpu_power_peak_30m_watts{gpu=\"%d\"} %.1f\n", d, peak_gpu_power_mw[d].peak);
     }
 
     /* RDMA / InfiniBand */
@@ -1802,8 +1850,11 @@ static void draw_screen(void) {
 
     /* ── CPU section ────────────────────────────────────────────────── */
     int cpu_temp = read_cpu_temp();
-    if (cpu_temp > peak_cpu_temp_c) peak_cpu_temp_c = cpu_temp;
     int cpu_freq = read_cpu_freq_mhz();
+
+    /* Update windowed peaks */
+    update_windowed_peak(&peak_cpu_pct, cpu_pct[0]);
+    update_windowed_peak(&peak_cpu_temp_c, cpu_temp);
 
     /* Auto-calculate column count: ~36 chars per column minimum */
     int ncols;
@@ -2085,7 +2136,6 @@ static void draw_screen(void) {
                 int ttemp = read_tegra_gpu_temp();
                 if (ttemp > 0) gs->temp = (unsigned int)ttemp;
             }
-            if ((double)gs->temp > peak_gpu_temp_c) peak_gpu_temp_c = gs->temp;
 
             gs->has_power = (pNvmlDeviceGetPowerUsage &&
                              pNvmlDeviceGetPowerUsage(dev, &gs->power_mw) == NVML_SUCCESS);
@@ -2093,6 +2143,14 @@ static void draw_screen(void) {
                 pNvmlDeviceGetClockInfo(dev, NVML_CLOCK_GRAPHICS, &gs->clk_gfx);
             gs->has_fan = (pNvmlDeviceGetFanSpeed &&
                            pNvmlDeviceGetFanSpeed(dev, &gs->fan) == NVML_SUCCESS);
+
+            /* Update windowed peaks for this GPU */
+            if (peak_gpu_util) {
+                update_windowed_peak(&peak_gpu_util[d], gs->util_gpu);
+                update_windowed_peak(&peak_gpu_temp_c[d], gs->temp);
+                if (gs->has_power)
+                    update_windowed_peak(&peak_gpu_power_mw[d], gs->power_mw / 1000.0);
+            }
 
             nvmlMemory_t mem = {0};
             gs->has_mem = (pNvmlDeviceGetMemoryInfo &&
@@ -2542,6 +2600,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Allocate windowed peak arrays for GPUs */
+    if (gpu_count > 0) {
+        peak_gpu_util    = calloc(gpu_count, sizeof(WindowedPeak));
+        peak_gpu_temp_c  = calloc(gpu_count, sizeof(WindowedPeak));
+        peak_gpu_power_mw = calloc(gpu_count, sizeof(WindowedPeak));
+        if (!peak_gpu_util || !peak_gpu_temp_c || !peak_gpu_power_mw) {
+            fprintf(stderr, "Failed to allocate GPU peak arrays for %u GPUs\n", gpu_count);
+            return 1;
+        }
+    }
+
     /* Initial CPU tick read */
     read_cpu_ticks(prev_ticks, &num_cpus);
     usleep(100000); /* brief pause for first delta */
@@ -2670,6 +2739,9 @@ int main(int argc, char *argv[]) {
     free(cur_ticks);  cur_ticks = NULL;
     free(cpu_pct);    cpu_pct = NULL;
     free(cpu_part);   cpu_part = NULL;
+    free(peak_gpu_util);    peak_gpu_util = NULL;
+    free(peak_gpu_temp_c);  peak_gpu_temp_c = NULL;
+    free(peak_gpu_power_mw); peak_gpu_power_mw = NULL;
 
     return 0;
 }
