@@ -822,6 +822,7 @@ static void fmt_uptime(char *buf, int len) {
 /* ── Load average ───────────────────────────────────────────────────── */
 
 static void get_loadavg(double *l1, double *l5, double *l15) {
+    *l1 = *l5 = *l15 = 0.0;
     FILE *f = fopen("/proc/loadavg", "r");
     if (f) { (void)!fscanf(f, "%lf %lf %lf", l1, l5, l15); fclose(f); }
 }
@@ -1395,7 +1396,8 @@ static int format_metrics(char *buf, int buflen) {
         unsigned int dev_count = 0;
         pNvmlDeviceGetCount(&dev_count);
 
-        for (unsigned int d = 0; d < dev_count && d < gpu_count; d++) {
+        for (unsigned int d = 0; gpus && d < dev_count && d < gpu_count; d++) {
+            if ((unsigned int)n_gpus >= gpu_count) break;
             PromGpu *g = &gpus[n_gpus];
             memset(g, 0, sizeof(*g));
             nvmlDevice_t dev;
