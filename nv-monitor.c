@@ -2650,5 +2650,11 @@ int main(int argc, char *argv[]) {
     if (nvml_ok && pNvmlShutdown) pNvmlShutdown();
     if (nvml_handle) dlclose(nvml_handle);
 
+    /* Free startup allocations */
+    free(prev_ticks); prev_ticks = NULL;
+    free(cur_ticks);  cur_ticks = NULL;
+    free(cpu_pct);    cpu_pct = NULL;
+    free(cpu_part);   cpu_part = NULL;
+
     return 0;
 }
