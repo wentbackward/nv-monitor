@@ -80,6 +80,14 @@ Accurately monitor a single machine or an entire cluster with minimal overhead. 
 
 There's a [binary release](https://github.com/wentbackward/nv-monitor/releases) built on every release via GitHub CI/CD pipelines.
 
+### Arch Linux
+
+On Arch-based Linux distributions, you can install nv-monitor directly with pacman when the AUR is enabled:
+
+```bash
+pacman -S nv-monitor
+```
+
 ## Building
 
 Requires `gcc` and `libncurses-dev`:
