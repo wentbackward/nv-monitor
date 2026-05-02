@@ -25,6 +25,8 @@
 #include <locale.h>
 #include <sys/sysinfo.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <mntent.h>
 #include <getopt.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -1426,6 +1428,94 @@ static int format_metrics(char *buf, int buflen) {
            "nv_network_transmit_bytes_per_second %.0f\n",
            net_totals.rx_bytes, net_totals.tx_bytes,
            net_totals.rx_bytes_sec, net_totals.tx_bytes_sec);
+    }
+
+    /* Disk usage per real mountpoint (skip pseudo/virtual fs) */
+    {
+        struct {
+            char mount[256];
+            char fstype[32];
+            char device[128];
+            unsigned long long total;
+            unsigned long long avail;
+            unsigned long long used;
+        } disks[64];
+        int n_disks = 0;
+
+        FILE *mf = setmntent("/proc/mounts", "r");
+        if (mf) {
+            struct mntent *me;
+            while ((me = getmntent(mf)) != NULL && n_disks < 64) {
+                /* Skip pseudo / virtual filesystems */
+                if (strcmp(me->mnt_type, "tmpfs") == 0 ||
+                    strcmp(me->mnt_type, "devtmpfs") == 0 ||
+                    strcmp(me->mnt_type, "overlay") == 0 ||
+                    strcmp(me->mnt_type, "squashfs") == 0 ||
+                    strcmp(me->mnt_type, "proc") == 0 ||
+                    strcmp(me->mnt_type, "sysfs") == 0 ||
+                    strcmp(me->mnt_type, "cgroup") == 0 ||
+                    strcmp(me->mnt_type, "cgroup2") == 0 ||
+                    strcmp(me->mnt_type, "devpts") == 0 ||
+                    strcmp(me->mnt_type, "mqueue") == 0 ||
+                    strcmp(me->mnt_type, "hugetlbfs") == 0 ||
+                    strcmp(me->mnt_type, "debugfs") == 0 ||
+                    strcmp(me->mnt_type, "tracefs") == 0 ||
+                    strcmp(me->mnt_type, "fusectl") == 0 ||
+                    strcmp(me->mnt_type, "configfs") == 0 ||
+                    strcmp(me->mnt_type, "pstore") == 0 ||
+                    strcmp(me->mnt_type, "bpf") == 0 ||
+                    strcmp(me->mnt_type, "autofs") == 0 ||
+                    strcmp(me->mnt_type, "binfmt_misc") == 0 ||
+                    strcmp(me->mnt_type, "rpc_pipefs") == 0 ||
+                    strcmp(me->mnt_type, "nsfs") == 0 ||
+                    strcmp(me->mnt_type, "securityfs") == 0 ||
+                    strcmp(me->mnt_type, "efivarfs") == 0 ||
+                    strncmp(me->mnt_fsname, "/dev/loop", 9) == 0)
+                    continue;
+                /* Only real device-backed mounts */
+                if (me->mnt_fsname[0] != '/')
+                    continue;
+
+                struct statvfs sv;
+                if (statvfs(me->mnt_dir, &sv) != 0)
+                    continue;
+
+                unsigned long long total = (unsigned long long)sv.f_blocks * sv.f_frsize;
+                unsigned long long avail = (unsigned long long)sv.f_bavail * sv.f_frsize;
+                if (total == 0)
+                    continue;
+                unsigned long long used = total - (unsigned long long)sv.f_bfree * sv.f_frsize;
+
+                snprintf(disks[n_disks].mount, sizeof(disks[n_disks].mount), "%s", me->mnt_dir);
+                snprintf(disks[n_disks].fstype, sizeof(disks[n_disks].fstype), "%s", me->mnt_type);
+                snprintf(disks[n_disks].device, sizeof(disks[n_disks].device), "%s", me->mnt_fsname);
+                disks[n_disks].total = total;
+                disks[n_disks].avail = avail;
+                disks[n_disks].used = used;
+                n_disks++;
+            }
+            endmntent(mf);
+        }
+
+        if (n_disks > 0) {
+            PM("# HELP nv_disk_total_bytes Filesystem total size\n"
+               "# TYPE nv_disk_total_bytes gauge\n");
+            for (int i = 0; i < n_disks; i++)
+                PM("nv_disk_total_bytes{mountpoint=\"%s\",device=\"%s\",fstype=\"%s\"} %llu\n",
+                   disks[i].mount, disks[i].device, disks[i].fstype, disks[i].total);
+
+            PM("# HELP nv_disk_used_bytes Filesystem used bytes\n"
+               "# TYPE nv_disk_used_bytes gauge\n");
+            for (int i = 0; i < n_disks; i++)
+                PM("nv_disk_used_bytes{mountpoint=\"%s\",device=\"%s\",fstype=\"%s\"} %llu\n",
+                   disks[i].mount, disks[i].device, disks[i].fstype, disks[i].used);
+
+            PM("# HELP nv_disk_avail_bytes Filesystem available bytes\n"
+               "# TYPE nv_disk_avail_bytes gauge\n");
+            for (int i = 0; i < n_disks; i++)
+                PM("nv_disk_avail_bytes{mountpoint=\"%s\",device=\"%s\",fstype=\"%s\"} %llu\n",
+                   disks[i].mount, disks[i].device, disks[i].fstype, disks[i].avail);
+        }
     }
 
     /* GPU — collect data first, then format grouped by metric family */

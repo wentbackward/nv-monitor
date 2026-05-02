@@ -158,6 +158,9 @@ curl -s localhost:9101/metrics     # Check it works
 | `nv_memory_bufcache_bytes` | gauge | | Buffer and cache memory |
 | `nv_swap_total_bytes` | gauge | | Total swap |
 | `nv_swap_used_bytes` | gauge | | Swap used |
+| `nv_disk_total_bytes` | gauge | `mountpoint`, `device`, `fstype` | Filesystem total size (per real mount) |
+| `nv_disk_used_bytes` | gauge | `mountpoint`, `device`, `fstype` | Filesystem used bytes |
+| `nv_disk_avail_bytes` | gauge | `mountpoint`, `device`, `fstype` | Filesystem available bytes |
 | `nv_gpu_info` | gauge | `gpu`, `name` | GPU device name |
 | `nv_gpu_utilization_percent` | gauge | `gpu` | GPU compute utilization |
 | `nv_gpu_temperature_celsius` | gauge | `gpu` | GPU temperature |
