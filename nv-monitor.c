@@ -2121,17 +2121,32 @@ static void draw_screen(void) {
     }
 
     if (net_totals.valid) {
+        /* Sum RDMA (IB/RoCE) rates into the NET display so CX-7 NCCL traffic is visible.
+         * RDMA bypasses /proc/net/dev entirely, so without this the bar shows near-zero
+         * during inference all-reduces. */
+        double rdma_rx = 0.0, rdma_tx = 0.0;
+        if (rdma_available) {
+            for (int i = 0; i < rdma_count; i++) {
+                rdma_rx += rdma_ports[i].recv_bytes_sec;
+                rdma_tx += rdma_ports[i].xmit_bytes_sec;
+            }
+        }
+        double disp_rx = net_totals.rx_bytes_sec + rdma_rx;
+        double disp_tx = net_totals.tx_bytes_sec + rdma_tx;
+        double total_combined = disp_rx + disp_tx;
+        if (total_combined > net_scale_bytes_sec) net_scale_bytes_sec = total_combined;
+
         char rx[16], tx[16], scale[16];
         attron(A_BOLD | COLOR_PAIR(6));
-        mvprintw(y, 1, "NET");
+        mvprintw(y, 1, rdma_available ? "NET+IB" : "NET");
         attroff(A_BOLD | COLOR_PAIR(6));
         attron(COLOR_PAIR(2));
         printw("  ");
-        printw("%s", fmt_rate(net_totals.rx_bytes_sec, rx, sizeof(rx)));
+        printw("%s", fmt_rate(disp_rx, rx, sizeof(rx)));
         attroff(COLOR_PAIR(2));
         printw(" down");
         attron(COLOR_PAIR(3));
-        printw("  %s", fmt_rate(net_totals.tx_bytes_sec, tx, sizeof(tx)));
+        printw("  %s", fmt_rate(disp_tx, tx, sizeof(tx)));
         attroff(COLOR_PAIR(3));
         printw(" up");
         y++;
@@ -2139,8 +2154,8 @@ static void draw_screen(void) {
         mvprintw(y, 1, "  I/O ");
         int bw = cols - 24;
         if (bw < 10) bw = 10;
-        double rx_pct = net_scale_bytes_sec > 0 ? net_totals.rx_bytes_sec / net_scale_bytes_sec * 100.0 : 0;
-        double tx_pct = net_scale_bytes_sec > 0 ? net_totals.tx_bytes_sec / net_scale_bytes_sec * 100.0 : 0;
+        double rx_pct = net_scale_bytes_sec > 0 ? disp_rx / net_scale_bytes_sec * 100.0 : 0;
+        double tx_pct = net_scale_bytes_sec > 0 ? disp_tx / net_scale_bytes_sec * 100.0 : 0;
         if (rx_pct < 0) rx_pct = 0;
         if (tx_pct < 0) tx_pct = 0;
         if (rx_pct + tx_pct > 100.0) {
