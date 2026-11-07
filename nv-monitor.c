@@ -1157,6 +1157,46 @@ static void log_csv_header(FILE *f) {
     fflush(f);
 }
 
+/* Advance the 30-minute windowed peaks without drawing. In TUI mode
+ * draw_screen() does this as a side effect of collecting its data; in
+ * headless mode nothing else would, so the main loop calls this instead.
+ * Runs on the main thread only (the Prometheus thread just reads peaks). */
+static void sample_windowed_peaks(void) {
+    update_windowed_peak(&peak_cpu_pct, cpu_pct[0]);
+    update_windowed_peak(&peak_cpu_temp_c, read_cpu_temp());
+
+    if (!nvml_ok || !peak_gpu_util) return;
+    for (unsigned int d = 0; d < gpu_count; d++) {
+        nvmlDevice_t dev;
+        if (pNvmlDeviceGetHandleByIndex(d, &dev) != NVML_SUCCESS) continue;
+
+        nvmlUtilization_t util = {0};
+        if (!use_tegra_gpu && pNvmlDeviceGetUtilizationRates)
+            pNvmlDeviceGetUtilizationRates(dev, &util);
+        if (use_tegra_gpu) {
+            int tutil = read_tegra_gpu_util();
+            if (tutil >= 0) util.gpu = (unsigned int)tutil;
+        }
+
+        unsigned int temp = 0;
+        if (!use_tegra_gpu && pNvmlDeviceGetTemperature)
+            pNvmlDeviceGetTemperature(dev, NVML_TEMPERATURE_GPU, &temp);
+        if (use_tegra_gpu && tegra_gpu_therm_zone >= 0) {
+            int ttemp = read_tegra_gpu_temp();
+            if (ttemp > 0) temp = (unsigned int)ttemp;
+        }
+
+        unsigned int power_mw = 0;
+        int has_power = (pNvmlDeviceGetPowerUsage &&
+                         pNvmlDeviceGetPowerUsage(dev, &power_mw) == NVML_SUCCESS);
+
+        update_windowed_peak(&peak_gpu_util[d], util.gpu);
+        update_windowed_peak(&peak_gpu_temp_c[d], temp);
+        if (has_power)
+            update_windowed_peak(&peak_gpu_power_mw[d], power_mw / 1000.0);
+    }
+}
+
 static void log_csv_row(FILE *f) {
     /* Timestamp */
     struct timespec ts;
@@ -2825,6 +2865,7 @@ int main(int argc, char *argv[]) {
             compute_cpu_usage();
             read_net_totals();
             read_rdma_ports();
+            sample_windowed_peaks();
             if (log_fp) log_csv_row(log_fp);
             usleep(headless_interval * 1000);
         }
