@@ -219,6 +219,7 @@ typedef struct {
 } WindowedPeak;
 
 #define PEAK_WINDOW_SECS 1800  /* 30 minutes */
+#define FULL_REPAINT_SECS 60   /* periodic TUI full repaint (safety net) */
 
 static WindowedPeak peak_cpu_pct;
 static WindowedPeak peak_cpu_temp_c;
@@ -2893,13 +2894,21 @@ int main(int argc, char *argv[]) {
         }
 
         int log_elapsed = 0;
+        time_t last_full_repaint = time(NULL);
 
         while (!g_quit) {
             compute_cpu_usage();
             read_net_totals();
             read_rdma_ports();
-            /* Force full repaint to recover from terminal corruption */
-            clearok(stdscr, TRUE);
+            /* ncurses only redraws changed cells. A full clear every frame
+             * flickers (#43), so only do one as a periodic safety net in case
+             * something else wrote to the terminal behind ncurses' back.
+             * Resize and Ctrl-L also force one. */
+            time_t now = time(NULL);
+            if (now - last_full_repaint >= FULL_REPAINT_SECS) {
+                clearok(stdscr, TRUE);
+                last_full_repaint = now;
+            }
             draw_screen();
 
             /* Log at log_interval_ms if logging enabled */
@@ -2945,7 +2954,12 @@ int main(int argc, char *argv[]) {
                 } else if (ch == KEY_RESIZE) {
                     cpu_scroll = 0;
                     skip_history_once = 1;
+                    clearok(stdscr, TRUE);
                     break; /* redraw immediately */
+                } else if (ch == 12) { /* Ctrl-L: manual full repaint */
+                    clearok(stdscr, TRUE);
+                    last_full_repaint = time(NULL);
+                    break;
                 }
                 usleep(50000);
                 elapsed += 50;

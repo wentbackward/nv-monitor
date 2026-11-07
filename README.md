@@ -138,6 +138,7 @@ sudo make install
 | `c`         | Cycle CPU column count (auto → 1 → 2 → 3 → 4)|
 | `j`/`k` or ↑/↓ | Scroll CPU cores when they exceed the viewport |
 | `+`/`-`     | Adjust refresh rate (250ms steps)            |
+| Ctrl-L      | Force a full screen repaint                  |
 
 The CPU section auto-selects the column count based on terminal width and adapts on resize. When cores exceed the available vertical space, a scroll indicator `[first-last] ↑↓` appears on the CPU header line. Use `-c N` to override the auto column count at startup.
 
